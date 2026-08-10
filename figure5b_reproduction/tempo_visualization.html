@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TEMPO / Pfadintegral-Algorithmus — interaktive Visualisierung</title>
+<style>
+  :root{
+    --bg:#f6f7fb; --card:#ffffff; --ink:#1b2030; --muted:#5b6474; --line:#d7dbe6;
+    --node:#e9edf5; --nodeStroke:#8b93a6; --openFill:#dfe7ff; --openStroke:#5b76d6;
+    --free:#2f6fed;      /* P  */
+    --half:#7b3ff2;      /* Ph */
+    --local:#12a150;     /* I0 */
+    --memory:#e5484d;    /* I_dk */
+    --path:#f5a623;      /* selected path */
+    --window:#4457c9;    /* memory window box */
+    --newSlice:#12a150;  /* newly read slice */
+    --dropSlice:#c0392b; /* marginalised slice */
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1220; --card:#171b2b; --ink:#e8ebf4; --muted:#a2acc2; --line:#2a3046;
+      --node:#232a3f; --nodeStroke:#6b76a0; --openFill:#26325e; --openStroke:#8ea2ff;
+      --free:#5b8dff; --half:#a985ff; --local:#3ecb7f; --memory:#ff6b70; --path:#ffbf4d;
+      --window:#7b8bff;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 18px 60px}
+  h1{font-size:20px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+        padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(20,25,50,.04)}
+  .formula{font-size:15px;overflow-x:auto;padding-bottom:6px}
+  .term{border-radius:6px;padding:2px 5px;cursor:default;transition:background .12s,box-shadow .12s;
+        border-bottom:3px solid transparent;white-space:nowrap;display:inline-block}
+  .term:hover{background:rgba(120,130,160,.12)}
+  .t-end{border-color:var(--half)} .t-free{border-color:var(--free)}
+  .t-local{border-color:var(--local)} .t-mem{border-color:var(--memory)}
+  .t-start{border-color:var(--half)}
+  .term.active{box-shadow:0 0 0 2px currentColor inset}
+  sub{font-size:.72em}
+  .controls{display:flex;flex-wrap:wrap;gap:20px 26px;align-items:flex-start}
+  .grp{display:flex;flex-direction:column;gap:8px;min-width:150px}
+  .grp h3{margin:0 0 2px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  label.chk{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;user-select:none}
+  label.chk .swatch{width:22px;height:0;border-top-width:3px;border-top-style:solid;border-radius:2px;flex:none}
+  .sld{display:flex;align-items:center;gap:8px;font-size:13px}
+  .sld input[type=range]{width:120px}
+  .sld b{font-variant-numeric:tabular-nums;min-width:16px;display:inline-block;text-align:center}
+  button{font:inherit;font-size:13px;padding:7px 12px;border:1px solid var(--line);
+         background:var(--card);color:var(--ink);border-radius:8px;cursor:pointer}
+  button:hover{border-color:var(--nodeStroke)}
+  button.primary{background:var(--free);border-color:var(--free);color:#fff}
+  button.primary:hover{filter:brightness(1.05)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .btnrow{display:flex;gap:8px;flex-wrap:wrap}
+  .modebar{display:flex;gap:0;border:1px solid var(--line);border-radius:9px;overflow:hidden;width:max-content}
+  .modebar button{border:0;border-radius:0;background:transparent}
+  .modebar button.on{background:var(--free);color:#fff}
+  .stagewrap{overflow-x:auto}
+  svg{display:block;min-width:640px}
+  .nodelabel{font-size:11px;fill:var(--muted)}
+  .collabel{font-size:12px;fill:var(--ink);font-weight:600}
+  .info{font-size:13.5px}
+  .info h3{margin:0 0 8px;font-size:13px}
+  .prod{font-size:14px;line-height:2;word-break:break-word}
+  .chip{display:inline-block;border-radius:6px;padding:1px 6px;margin:1px 2px;color:#fff;font-variant-numeric:tabular-nums;font-size:12.5px}
+  .c-free{background:var(--free)} .c-half{background:var(--half)}
+  .c-local{background:var(--local)} .c-mem{background:var(--memory)}
+  .narr{background:rgba(120,130,160,.08);border-radius:8px;padding:12px 14px;font-size:13.5px}
+  .narr b{color:var(--ink)}
+  .pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600}
+  .p-new{background:rgba(18,161,80,.16);color:var(--local)}
+  .p-keep{background:rgba(68,87,201,.16);color:var(--window)}
+  .p-drop{background:rgba(229,72,77,.16);color:var(--memory)}
+  .legend{display:flex;flex-wrap:wrap;gap:14px 20px;font-size:12.5px;color:var(--muted)}
+  .legend .it{display:flex;align-items:center;gap:7px}
+  .legend .ln{width:24px;border-top-width:3px;border-top-style:solid}
+  .legend .dot{width:12px;height:12px;border-radius:50%}
+  .hint{color:var(--muted);font-size:12.5px;margin-top:8px}
+  .muted{color:var(--muted)}
+  code{background:rgba(120,130,160,.14);padding:1px 5px;border-radius:5px;font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>TEMPO / Pfadintegral-Algorithmus — interaktive Visualisierung</h1>
+  <p class="sub">2×2-System · Liouville-Index α mit 4 Werten (ρ<sub>00</sub>, ρ<sub>01</sub>, ρ<sub>10</sub>, ρ<sub>11</sub>) · alle Terme der diskreten Pfadsumme 𝓛(t<sub>N</sub>)</p>
+
+  <!-- ============ FORMULA ============ -->
+  <div class="card">
+    <div class="formula" id="formula">
+      𝓛(t<sub>N</sub>)<sub>β α₀</sub> = <span class="muted">∑<sub>α₁…α<sub>N</sub></sub></span>
+      <span class="term t-end" data-cls="end">(P<sub>h</sub>)<sub>β α<sub>N</sub></sub></span>
+      <span class="term t-free" data-cls="free">∏<sub>k=2</sub><sup>N</sup> P<sub>α<sub>k</sub> α<sub>k−1</sub></sub></span>
+      <span class="term t-local" data-cls="local">∏<sub>k=1</sub><sup>N</sup> I₀(α<sub>k</sub>)</span>
+      <span class="term t-mem" data-cls="memory">∏<sub>k&gt;k′, k−k′≤K</sub> I<sub>k−k′</sub>(α<sub>k</sub>, α<sub>k′</sub>)</span>
+      <span class="term t-start" data-cls="start">(P<sub>h</sub>)<sub>α₁ α₀</sub></span>
+    </div>
+    <div class="hint">Fahre mit der Maus über einen Term, um die zugehörigen Elemente im Gitter hervorzuheben. Die Farben unter den Termen entsprechen den Farben im Diagramm.</div>
+  </div>
+
+  <!-- ============ CONTROLS ============ -->
+  <div class="card">
+    <div class="controls">
+      <div class="grp">
+        <h3>Modus</h3>
+        <div class="modebar" id="modebar">
+          <button data-mode="explore" class="on">Pfade erkunden</button>
+          <button data-mode="march">Algorithmus abspielen</button>
+        </div>
+        <div class="sld">N (Zeitschritte) <input type="range" id="Nsl" min="2" max="8" value="5"><b id="Nval">5</b></div>
+        <div class="sld">K (Gedächtnis) <input type="range" id="Ksl" min="1" max="7" value="2"><b id="Kval">2</b></div>
+      </div>
+
+      <div class="grp">
+        <h3>Term-Ebenen</h3>
+        <label class="chk"><span class="swatch" style="border-color:var(--half)"></span><input type="checkbox" id="ly-start" checked> Start-Halbschritt (P<sub>h</sub>)</label>
+        <label class="chk"><span class="swatch" style="border-color:var(--free)"></span><input type="checkbox" id="ly-free" checked> Freie Schritte P</label>
+        <label class="chk"><span class="swatch" style="border-color:var(--local)"></span><input type="checkbox" id="ly-local" checked> Lokale Tiles I₀</label>
+        <label class="chk"><span class="swatch" style="border-color:var(--memory)"></span><input type="checkbox" id="ly-memory" checked> Gedächtnis-Tiles I<sub>Δ</sub></label>
+        <label class="chk"><span class="swatch" style="border-color:var(--half)"></span><input type="checkbox" id="ly-end" checked> End-Halbschritt (P<sub>h</sub>)</label>
+      </div>
+
+      <div class="grp" id="explore-ctrls">
+        <h3>Pfad (Summe über α)</h3>
+        <label class="chk"><input type="checkbox" id="ly-alledges" checked> alle Kanten schwach zeigen</label>
+        <div class="btnrow">
+          <button id="randPath" class="primary">Zufälliger Pfad</button>
+          <button id="clearPath">Pfad löschen</button>
+        </div>
+        <div class="hint">Klicke je Spalte einen Knoten, um einen Pfad zu bauen. α₀ und β wählst du als Ein-/Ausgang.</div>
+      </div>
+
+      <div class="grp" id="march-ctrls" style="display:none">
+        <h3>Vorwärts-Marsch</h3>
+        <div class="btnrow">
+          <button id="stepBack">◀ Schritt</button>
+          <button id="play" class="primary">▶ Abspielen</button>
+          <button id="stepFwd">Schritt ▶</button>
+        </div>
+        <div class="btnrow"><button id="resetMarch">Zurücksetzen</button></div>
+        <div class="sld">Tempo <input type="range" id="speed" min="1" max="10" value="5"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ STAGE ============ -->
+  <div class="card">
+    <div class="stagewrap"><svg id="stage" xmlns="http://www.w3.org/2000/svg"></svg></div>
+    <div class="legend" style="margin-top:12px">
+      <div class="it"><span class="ln" style="border-color:var(--half)"></span>P<sub>h</sub> Halbschritt (Start/End)</div>
+      <div class="it"><span class="ln" style="border-color:var(--free)"></span>P freier Schritt (k↔k−1)</div>
+      <div class="it"><span class="dot" style="background:var(--local)"></span>I₀ lokal (jeder Schritt k)</div>
+      <div class="it"><span class="ln" style="border-color:var(--memory)"></span>I<sub>Δ</sub> Gedächtnis (k↔k−Δ, Δ≤K)</div>
+      <div class="it"><span class="dot" style="background:var(--path)"></span>gewählter Pfad (Knoten gold; Kanten dick in Termfarbe)</div>
+      <div class="it"><span class="ln" style="border-color:var(--window);border-top-style:dashed"></span>Gedächtnisfenster</div>
+    </div>
+  </div>
+
+  <!-- ============ INFO ============ -->
+  <div class="card info" id="infoCard">
+    <div id="info-explore">
+      <h3>Beitrag des gewählten Pfades zur Summe</h3>
+      <div id="prod" class="prod"></div>
+    </div>
+    <div id="info-march" style="display:none">
+      <h3>Was passiert in diesem Schritt?</h3>
+      <div id="narr" class="narr"></div>
+    </div>
+  </div>
+
+  <p class="hint">
+    Jeder <b>Pfad</b> = eine Wahl von α<sub>k</sub> (einem der 4 Dichtematrix-Elemente) je Spalte. Die Summe 𝓛 = Σ<sub>α</sub> läuft über <b>alle</b> Pfade;
+    jeder Pfad trägt das Produkt seiner Kanten (P, P<sub>h</sub>), seiner Knoten (I₀) und seiner Gedächtnis-Bögen (I<sub>Δ</sub>) bei.
+    Im Marsch-Modus siehst du, wie der Algorithmus je Schritt eine neue Spalte <span class="pill p-new">einliest</span>,
+    die letzten K Spalten <span class="pill p-keep">im Gedächtnis behält</span> und die zu alte Spalte <span class="pill p-drop">wegsummiert</span>.
+  </p>
+</div>
+
+<script>
+"use strict";
+// ---- Zustands-Definitionen -------------------------------------------------
+// FB-Index alpha = (s+, s-) für d=2  ->  4 Werte
+const FB = [ [0,0], [0,1], [1,0], [1,1] ];
+const FBlabel = FB.map(([a,b]) => a+""+b);                 // "00","01","10","11"
+const isCoh   = FB.map(([a,b]) => a!==b);                  // Kohärenz (I0 dämpft) vs Population
+
+const S = {
+  N:5, K:2,
+  layers:{start:true, free:true, local:true, memory:true, end:true, allEdges:true},
+  path:{},          // key "0".."N" und "beta"  -> row 0..3
+  mode:"explore",
+  marchT:1,
+  playing:false, timer:null
+};
+
+// ---- Geometrie -------------------------------------------------------------
+const ML=96, MR=54, MT=96, MB=34, COLGAP=98, ROWGAP=56, RX=17, RY=11;
+function nCols(){ return S.N + 2; }                        // alpha0..alphaN + beta
+function colX(c){ return ML + c*COLGAP; }                 // c: 0..N  -> alpha_c ; N+1 -> beta
+function rowY(r){ return MT + r*ROWGAP; }
+function svgW(){ return ML + (nCols()-1)*COLGAP + MR; }
+function svgH(){ return MT + 3*ROWGAP + MB; }
+const isAlpha = c => c>=0 && c<=S.N;
+const isBeta  = c => c===S.N+1;
+
+// column label
+function colName(c){
+  if(isBeta(c)) return "β";
+  if(c===0) return "α₀";
+  return "α" + sub(c);
+}
+function sub(n){ const m={0:"₀",1:"₁",2:"₂",3:"₃",4:"₄",5:"₅",6:"₆",7:"₇",8:"₈",9:"₉"};
+  return (""+n).split("").map(d=>m[d]).join(""); }
+
+// ---- SVG helpers -----------------------------------------------------------
+function line(x1,y1,x2,y2,cls,extra=""){ return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" class="${cls}" ${extra}/>`; }
+function arc(x1,y1,x2,y2,lift,cls,extra=""){ const mx=(x1+x2)/2, my=Math.min(y1,y2)-lift;
+  return `<path d="M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}" fill="none" class="${cls}" ${extra}/>`; }
+
+// ---- Rendering -------------------------------------------------------------
+const stage = document.getElementById("stage");
+function render(){
+  const W=svgW(), H=svgH();
+  stage.setAttribute("viewBox",`0 0 ${W} ${H}`);
+  stage.setAttribute("width", W);
+  stage.setAttribute("height", H);
+  let g = "";
+
+  // defs (styles inside svg so classes work) --------------------------------
+  g += `<style>
+    .edge{stroke-width:1.4}
+    .e-free{stroke:var(--free)} .e-half{stroke:var(--half)}
+    .e-mem{stroke:var(--memory);stroke-width:1.6}
+    .faint{opacity:.22} .semifaint{opacity:.5}
+    .e-sel{stroke-width:3.6;opacity:1}   /* selected path: keep term colour, just thicker */
+    .node{fill:var(--node);stroke:var(--nodeStroke);stroke-width:1.3}
+    .node.open{fill:var(--openFill);stroke:var(--openStroke)}
+    .node.sel{fill:var(--path);stroke:#b9791a;stroke-width:2}
+    .node.dim{opacity:.34}
+    .node.newslice{stroke:var(--newSlice);stroke-width:3}
+    .node.dropslice{stroke:var(--dropSlice);stroke-width:2.4;stroke-dasharray:3 2}
+    .i0ring{fill:none;stroke:var(--local)}
+    .winbox{fill:rgba(68,87,201,.06);stroke:var(--window);stroke-width:1.6;stroke-dasharray:6 4}
+    .hl-dim{opacity:.12}
+    text{font-family:inherit}
+  </style>`;
+
+  // memory window box (march mode) ------------------------------------------
+  if(S.mode==="march"){
+    const t=S.marchT, lo=Math.max(1, t-S.K), hi=t;
+    const x1=colX(lo)-RX-10, x2=colX(hi)+RX+10;
+    const y1=rowY(0)-RY-16, y2=rowY(3)+RY+14;
+    g += `<rect class="winbox" x="${x1}" y="${y1}" width="${x2-x1}" height="${y2-y1}" rx="10"/>`;
+    g += `<text x="${(x1+x2)/2}" y="${y1-6}" text-anchor="middle" class="collabel" fill="var(--window)">Gedächtnisfenster (K=${S.K})</text>`;
+  }
+
+  // ----- EDGES (draw behind nodes) -----
+  const showAll = S.mode==="explore" && S.layers.allEdges;
+  const pathComplete = isPathComplete();
+
+  // helper: is an edge on the selected path?
+  function onPathFree(cFrom,rFrom,cTo,rTo){
+    if(!pathComplete) return false;
+    return S.path[keyOf(cFrom)]===rFrom && S.path[keyOf(cTo)]===rTo;
+  }
+
+  // Start half-step: alpha0 -> alpha1
+  if(S.layers.start){
+    for(let ra=0;ra<4;ra++) for(let rb=0;rb<4;rb++){
+      const on = onPathFree(0,ra,1,rb);
+      if(showAll || on || activeCls==="start")
+        g += line(colX(0)+RX, rowY(ra), colX(1)-RX, rowY(rb),
+             "edge e-half "+(on?"e-sel": (activeCls==="start"?"semifaint":"faint")));
+    }
+  }
+  // Free steps: alpha_{k-1} -> alpha_k  (k=2..N)
+  if(S.layers.free){
+    for(let k=2;k<=S.N;k++) for(let ra=0;ra<4;ra++) for(let rb=0;rb<4;rb++){
+      const on = onPathFree(k-1,ra,k,rb);
+      const marchOn = S.mode==="march" && k===S.marchT;
+      if(showAll || on || (activeCls==="free") || marchOn)
+        g += line(colX(k-1)+RX, rowY(ra), colX(k)-RX, rowY(rb),
+             "edge e-free "+(on?"e-sel": ((activeCls==="free"||marchOn)?"semifaint":"faint")));
+    }
+  }
+  // End half-step: alphaN -> beta
+  if(S.layers.end){
+    const showEnd = S.mode!=="march" || S.marchT===S.N;
+    for(let ra=0;ra<4;ra++) for(let rb=0;rb<4;rb++){
+      const on = pathComplete && S.path[keyOf(S.N)]===ra && S.path["beta"]===rb;
+      if((showAll||on||activeCls==="end") && showEnd)
+        g += line(colX(S.N)+RX, rowY(ra), colX(S.N+1)-RX, rowY(rb),
+             "edge e-half "+(on?"e-sel": (activeCls==="end"?"semifaint":"faint")));
+    }
+  }
+  // Memory tiles: I_{k-k'}(alpha_k, alpha_k')   for 1<=k'<k<=N, k-k'<=K
+  if(S.layers.memory){
+    for(let k=1;k<=S.N;k++){
+      for(let d=1; d<=S.K && (k-d)>=1; d++){
+        const kp=k-d;
+        // in march mode: only arcs closing at the current new slice
+        if(S.mode==="march" && k!==S.marchT) continue;
+        for(let ra=0;ra<4;ra++) for(let rb=0;rb<4;rb++){
+          const on = pathComplete && S.path[keyOf(k)]===ra && S.path[keyOf(kp)]===rb;
+          const wantAll = (S.mode==="march") || (activeCls==="memory");
+          if(on){
+            g += arc(colX(k), rowY(ra)-RY, colX(kp), rowY(rb)-RY, 22+10*d, "e-mem e-sel");
+          } else if(wantAll && ra===rb){
+            // schematic representative arcs (I_Δ is really a full 4×4 coupling)
+            g += arc(colX(k), rowY(ra)-RY, colX(kp), rowY(rb)-RY, 22+10*d, "e-mem "+(S.mode==="march"?"semifaint":"faint"));
+          }
+        }
+      }
+    }
+  }
+
+  // ----- NODES -----
+  for(let c=0;c<nCols();c++){
+    const cc = c;                               // 0..N alpha, N+1 beta
+    for(let r=0;r<4;r++){
+      const x=colX(cc), y=rowY(r);
+      let cls="node";
+      if(isBeta(cc)||cc===0) cls+=" open";
+      const selRow = S.path[keyOf(cc)];
+      if(selRow===r) cls+=" sel";
+      // march styling
+      if(S.mode==="march"){
+        const t=S.marchT;
+        if(isAlpha(cc) && cc>=1){
+          if(cc>t) cls+=" dim";                     // not yet processed (future)
+          else if(cc===t) cls+=" newslice";         // just read in (new)
+          else if(cc===t-S.K-1) cls+=" dropslice";  // just left the window -> marginalised now
+          else if(cc< t-S.K-1) cls+=" dim";         // marginalised earlier
+          // else: cc in [t-K, t-1] -> kept in memory window (normal styling)
+        }
+        if(isBeta(cc) && t<S.N) cls+=" dim";
+      }
+      g += `<ellipse cx="${x}" cy="${y}" rx="${RX}" ry="${RY}" class="${cls}"
+              data-col="${cc}" data-row="${r}" style="cursor:${(S.mode==='explore')?'pointer':'default'}"/>`;
+      // I0 ring — einheitlich; I0(α_k) wirkt in jedem Schritt k=1..N.
+      // Gezeigt: auf Pfad-Knoten (Explore), auf bearbeiteten Spalten (Marsch),
+      // oder schwach überall beim Überfahren des I0-Terms.
+      if(S.layers.local && isAlpha(cc) && cc>=1){
+        let strength=0;
+        if(S.mode==="march"){
+          if(cc<=S.marchT) strength = (cc===S.marchT) ? 1 : 0.55;   // aktueller Schritt am hellsten
+        } else { // explore
+          if(pathComplete && S.path[keyOf(cc)]===r) strength = 1;   // auf dem Pfad
+          else if(activeCls==="local") strength = 0.35;             // I0-Term überfahren -> überall
+        }
+        if(strength>0)
+          g += `<ellipse cx="${x}" cy="${y}" rx="${RX+4}" ry="${RY+4}" class="i0ring"
+                  style="stroke-width:2;opacity:${strength}"/>`;
+      }
+      // node label (FB state)
+      g += `<text x="${x}" y="${y+3.5}" text-anchor="middle" class="nodelabel" style="pointer-events:none">${FBlabel[r]}</text>`;
+    }
+  }
+
+  // ----- COLUMN LABELS + open markers -----
+  for(let c=0;c<nCols();c++){
+    g += `<text x="${colX(c)}" y="${MT-30}" text-anchor="middle" class="collabel">${colName(c)}</text>`;
+    if(c===0||isBeta(c))
+      g += `<text x="${colX(c)}" y="${MT-15}" text-anchor="middle" class="nodelabel">offen</text>`;
+  }
+  // start/end half-step captions
+  if(S.layers.start) g += `<text x="${(colX(0)+colX(1))/2}" y="${MT-15}" text-anchor="middle" class="nodelabel" fill="var(--half)">(P_h) Start</text>`;
+  if(S.layers.end)   g += `<text x="${(colX(S.N)+colX(S.N+1))/2}" y="${MT-15}" text-anchor="middle" class="nodelabel" fill="var(--half)">(P_h) End</text>`;
+
+  // ----- ROW LABELS (left) -----
+  for(let r=0;r<4;r++){
+    g += `<text x="18" y="${rowY(r)+3.5}" class="nodelabel">ρ${FBlabel[r]}</text>`;
+    g += `<text x="18" y="${rowY(r)+15}" class="nodelabel" style="font-size:9px">${isCoh[r]?"Kohär.":"Popul."}</text>`;
+  }
+
+  stage.innerHTML = g;
+  bindNodes();
+  updateInfo();
+}
+
+// ---- Path helpers ----------------------------------------------------------
+function keyOf(c){ return isBeta(c) ? "beta" : String(c); }
+function isPathComplete(){
+  if(S.path["0"]===undefined || S.path["beta"]===undefined) return false;
+  for(let k=1;k<=S.N;k++) if(S.path[String(k)]===undefined) return false;
+  return true;
+}
+function bindNodes(){
+  if(S.mode!=="explore") return;
+  stage.querySelectorAll("ellipse[data-col]").forEach(elp=>{
+    elp.addEventListener("click",()=>{
+      const c=+elp.getAttribute("data-col"), r=+elp.getAttribute("data-row");
+      const k=keyOf(c);
+      S.path[k] = (S.path[k]===r) ? undefined : r;
+      if(S.path[k]===undefined) delete S.path[k];
+      render();
+    });
+  });
+}
+
+// ---- Info panel ------------------------------------------------------------
+function chip(cls,txt){ return `<span class="chip ${cls}">${txt}</span>`; }
+function updateInfo(){
+  document.getElementById("info-explore").style.display = S.mode==="explore"?"block":"none";
+  document.getElementById("info-march").style.display   = S.mode==="march"?"block":"none";
+  if(S.mode==="explore") updateProduct(); else updateNarration();
+}
+function st(c){ const r=S.path[keyOf(c)]; return r===undefined?"·":FBlabel[r]; }
+function updateProduct(){
+  const box=document.getElementById("prod");
+  if(!isPathComplete()){
+    box.innerHTML = `<span class="muted">Wähle je Spalte (α₀…α<sub>N</sub> und β) einen Knoten — oder klicke „Zufälliger Pfad".
+      Dann erscheint hier das Produkt der Faktoren, das dieser eine Pfad zur Summe 𝓛 beiträgt.</span>`;
+    return;
+  }
+  let parts=[];
+  parts.push(chip("c-half",`(P_h)<sub>${st("beta")} ${st(S.N)}</sub>`));           // end
+  for(let k=S.N;k>=2;k--) parts.push(chip("c-free",`P<sub>${st(k)} ${st(k-1)}</sub>`)); // free
+  for(let k=1;k<=S.N;k++) parts.push(chip("c-local",`I₀(${st(k)})`));               // local
+  for(let k=1;k<=S.N;k++) for(let d=1; d<=S.K && (k-d)>=1; d++)
+      parts.push(chip("c-mem",`I${sub(d)}(${st(k)},${st(k-d)})`));                  // memory
+  parts.push(chip("c-half",`(P_h)<sub>${st(1)} ${st(0)}</sub>`));                   // start
+  box.innerHTML = `Dieser Pfad ( α₀=${st(0)} → α₁=${st(1)} → … → α<sub>N</sub>=${st(S.N)} → β=${st("beta")} ) trägt bei:<br><br>`
+      + parts.join(" · ")
+      + `<div class="hint" style="margin-top:10px">𝓛 = Σ über <b>alle</b> ${Math.pow(4,S.N)} solcher Pfade (α₁…α<sub>N</sub>). Jeder liefert genau ein solches Produkt; das Endergebnis ist ihre Summe.</div>`;
+}
+function updateNarration(){
+  const box=document.getElementById("narr");
+  const t=S.marchT, lo=Math.max(1,t-S.K+1);
+  let s = `<b>Schritt k = ${t}</b> von N = ${S.N}.<br><br>`;
+  s += `<span class="pill p-new">einlesen</span> Neue Spalte <b>α${sub(t)}</b> wird angefügt (4 Werte). `;
+  s += `Es wirken sofort: der lokale Faktor <b>I₀(α${sub(t)})</b> (grüner Ring) `;
+  s += t>=2 ? `und der freie Schritt <b>P<sub>α${sub(t)} α${sub(t-1)}</sub></b> (blau) von der Vorgängerspalte.`
+            : `und — weil t=1 — der <b>Start-Halbschritt (P_h)<sub>α₁ α₀</sub></b> von der offenen Anfangsspalte.`;
+  s += `<br><br>`;
+  const backTo = Math.max(1, t-S.K);
+  if(t>=2){
+    s += `<span class="pill p-keep">Gedächtnis</span> α${sub(t)} koppelt über die <b>Gedächtnis-Tiles I<sub>Δ</sub></b> (rot) zurück an die letzten `
+       + `${t-backTo} Spalte(n) α${sub(t-1)}…α${sub(backTo)} — genau die im Fenster (K=${S.K}) liegenden. `;
+    s += `Diese Spalten wurden früher berechnet und werden <b>wiederverwendet</b> (nicht neu eingelesen).<br><br>`;
+  }
+  const drop = t-S.K-1;
+  if(drop>=1){
+    s += `<span class="pill p-drop">wegsummieren</span> Spalte <b>α${sub(drop)}</b> liegt jetzt mehr als K=${S.K} Schritte zurück. `
+       + `Kein zukünftiger Faktor kann sie noch erreichen → sie wird <b>marginalisiert</b> (aufsummiert) und verlässt das Fenster `
+       + `(gestrichelt-rot). So bleibt der Speicher auf ~K Spalten begrenzt.`;
+  } else {
+    s += `<span class="muted">Noch nichts zu marginalisieren — das Fenster ist noch nicht voll (erst ab k = K+2 = ${S.K+2}).</span>`;
+  }
+  if(t===S.N){
+    s += `<br><br><b>Letzter Schritt:</b> jetzt wird der <b>End-Halbschritt (P_h)<sub>β α<sub>N</sub></sub></b> angewandt und über alle `
+       + `physikalischen Beine summiert → das fertige 𝓛(t<sub>N</sub>)<sub>β α₀</sub>.`;
+  }
+  box.innerHTML = s;
+}
+
+// ---- Term hover highlight --------------------------------------------------
+let activeCls=null;
+document.querySelectorAll("#formula .term").forEach(t=>{
+  t.addEventListener("mouseenter",()=>{ activeCls=t.getAttribute("data-cls"); t.classList.add("active"); render(); });
+  t.addEventListener("mouseleave",()=>{ activeCls=null; t.classList.remove("active"); render(); });
+});
+
+// ---- Controls wiring -------------------------------------------------------
+function setMode(m){
+  S.mode=m; stopPlay();
+  document.querySelectorAll("#modebar button").forEach(b=>b.classList.toggle("on",b.dataset.mode===m));
+  document.getElementById("explore-ctrls").style.display = m==="explore"?"flex":"none";
+  document.getElementById("march-ctrls").style.display   = m==="march"?"flex":"none";
+  if(m==="march"){ S.marchT=1; }
+  render();
+}
+document.querySelectorAll("#modebar button").forEach(b=> b.addEventListener("click",()=>setMode(b.dataset.mode)) );
+
+function bindChk(id,key){ const e=document.getElementById(id);
+  e.addEventListener("change",()=>{ S.layers[key]=e.checked; render(); }); }
+bindChk("ly-start","start"); bindChk("ly-free","free"); bindChk("ly-local","local");
+bindChk("ly-memory","memory"); bindChk("ly-end","end"); bindChk("ly-alledges","allEdges");
+
+const Nsl=document.getElementById("Nsl"), Ksl=document.getElementById("Ksl");
+Nsl.addEventListener("input",()=>{
+  S.N=+Nsl.value; document.getElementById("Nval").textContent=S.N;
+  Ksl.max=S.N; if(S.K>S.N){S.K=S.N; Ksl.value=S.K; document.getElementById("Kval").textContent=S.K;}
+  // clamp path keys
+  Object.keys(S.path).forEach(k=>{ if(k!=="beta" && +k>S.N) delete S.path[k]; });
+  if(S.marchT>S.N) S.marchT=S.N;
+  render();
+});
+Ksl.addEventListener("input",()=>{ S.K=+Ksl.value; document.getElementById("Kval").textContent=S.K; render(); });
+
+document.getElementById("randPath").addEventListener("click",()=>{
+  S.path={}; S.path["0"]=(Math.random()*4)|0; S.path["beta"]=(Math.random()*4)|0;
+  for(let k=1;k<=S.N;k++) S.path[String(k)]=(Math.random()*4)|0;
+  render();
+});
+document.getElementById("clearPath").addEventListener("click",()=>{ S.path={}; render(); });
+
+// march controls
+function stepFwd(){ if(S.marchT<S.N){S.marchT++; render();} else stopPlay(); }
+function stepBack(){ if(S.marchT>1){S.marchT--; render();} }
+document.getElementById("stepFwd").addEventListener("click",stepFwd);
+document.getElementById("stepBack").addEventListener("click",stepBack);
+document.getElementById("resetMarch").addEventListener("click",()=>{ stopPlay(); S.marchT=1; render(); });
+function stopPlay(){ S.playing=false; if(S.timer){clearInterval(S.timer);S.timer=null;} const p=document.getElementById("play"); if(p)p.textContent="▶ Abspielen"; }
+document.getElementById("play").addEventListener("click",()=>{
+  if(S.playing){ stopPlay(); return; }
+  S.playing=true; document.getElementById("play").textContent="⏸ Pause";
+  const spd=+document.getElementById("speed").value;
+  S.timer=setInterval(()=>{ if(S.marchT>=S.N){ stopPlay(); } else stepFwd(); }, 1400 - spd*110);
+});
+
+// ---- go --------------------------------------------------------------------
+Ksl.max = S.N; if(S.K>S.N){S.K=S.N;Ksl.value=S.K;document.getElementById("Kval").textContent=S.K;}
+render();
+</script>
+</body>
+</html>
