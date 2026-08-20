@@ -53,7 +53,7 @@ def propagate_memory_shots(E, X0, n_steps, m, d, shots=10000):
     Hm, Qm = arnoldi(E, X0, m)
     m = Hm.shape[0]
     
-    mp = 1 << int(np.ceil(np.log2(m)))
+    mp = 2 ** int(np.ceil(np.log2(m + 1)))
     A = np.zeros((mp, mp), complex)
     A[:m, :m] = Hm
     

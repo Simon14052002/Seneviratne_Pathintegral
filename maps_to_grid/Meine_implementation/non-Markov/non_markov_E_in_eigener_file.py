@@ -2,6 +2,7 @@ import numpy as np
 import qutip as qt
 from scipy.linalg import expm
 from qutip.solver.heom import HEOMSolver, DrudeLorentzPadeBath
+from scipy.sparse.linalg import expm_multiply
 
 
 def _make_solver(H, lam, gamma, T_K, KB_CM, Nk, depth):
@@ -35,8 +36,6 @@ def heom_onestep_propagator(dt_fs, *, H, lam, gamma, T_K, KB_CM, FS_TO_CM,
 
     return P, solver._n_ados
 
-
-
 def heom_shorttime_maps(P, K, d):
     """The reduced maps L(0), L(dt), ..., L(K dt) extracted from the ONE
     propagator P -- no further HEOM solve, just K matrix-vector products.
@@ -61,10 +60,10 @@ def heom_shorttime_maps(P, K, d):
 def transfer_tensors(maps, K):
     """Transfer tensors T_1..T_K from the short-time maps L_1..L_K only."""
     T = []
-    for n in range(1, K + 1):
-        Tn = np.array(maps[n], dtype=complex, copy=True)
-        for m in range(1, n):
-            Tn -= T[m - 1] @ maps[n - m]
+    for n in range(1, K + 1):                              # maps[0] = I, T[0] = T1
+        Tn = np.array(maps[n], dtype=complex, copy=True)   # Set: Ti = maps[i] = Li -> T1 = L1,...
+        for m in range(1, n):                              # n=2: T2 = L2 - T[0] @ maps[1] = T1 @ L1
+            Tn -= T[m - 1] @ maps[n - m]                   # n=3: T3 = L3 - T[0] @ maps[2] - T[1] @ maps[1] = L3 - T1 @ L2 - T2 @ L1
         T.append(Tn)
     return T
 
