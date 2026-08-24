@@ -186,7 +186,6 @@ def propagate_memory_density_matrix(E, X0, n_steps, m, d):
             
         # 3. Ancilla für den nächsten Durchlauf freimachen (unabhängig vom Messergebnis)
         qc.reset(q_anc)
-        
         qc.save_density_matrix(q_sys, label=f't{t}')
         
     # Führt Schaltkreis auf Qiskits Dichtematrix-Simulator aus

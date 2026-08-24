@@ -82,7 +82,41 @@ def make_solver(*, H, lam, gamma, T_K, KB_CM, Nk=1, depth=3):
     return HEOMSolver(qt.Qobj(H), baths, max_depth=depth)
 
 
-def heom_generator(*, H, lam, gamma, T_K, KB_CM, FS_TO_CM, Nk=1, depth=3):
+def ado_scaling(solver, d):
+    """Diagonale ADO-Umskalierung nach Shi et al.
+
+    Die ADOs sind in der ueblichen HEOM-Konvention voellig verschieden gross:
+    ADO_n traegt den Vorfaktor prod_k c_k^{n_k}, und die c_k (Drude- und
+    Pade-Koeffizienten) spannen mehrere Groessenordnungen auf.  Genau diese
+    Spreizung landet spaeter in cond(W).  Die Umskalierung
+
+        rho~_n = rho_n / sqrt( prod_k n_k! |c_k|^{n_k} )
+
+    nimmt sie heraus, BEVOR der Lyapunov-Loeser sie zu sehen bekommt.  qutip 5
+    macht das nicht -- das `renorm`-Argument gab es bis QuTiP 4.6 und ist
+    ersatzlos entfallen.
+
+    Der nullte ADO hat das Label (0,...,0) und damit den Faktor 1, deshalb sind
+    Anfangszustand und Ablesung von der Umskalierung gar nicht betroffen.
+
+    Returns
+    -------
+    ndarray, Laenge n_ados*d^2 -- der Skalenfaktor pro Koordinate.
+    """
+    from math import factorial
+    ck = [abs(c) for c in solver.ados.ck]
+    out = []
+    for label in solver.ados.labels:
+        v = 1.0
+        for k, nk in enumerate(label):
+            if nk > 0:                              # Wäre nk=0 wäre v *= 1 was unnötig ist -> spart viel Rechenzeit das nk oft 0 ist
+                v *= factorial(nk) * ck[k] ** nk
+        out.append(np.sqrt(v))
+    return np.repeat(np.array(out, dtype=float), d * d)
+
+
+def heom_generator(*, H, lam, gamma, T_K, KB_CM, FS_TO_CM, Nk=1, depth=3,
+                   scale_ados=False):
     """The full HEOM generator A on the system+ADO space.
 
     Returns (A, info).  A is n x n with n = n_ados * d^2; the first d^2
@@ -93,7 +127,14 @@ def heom_generator(*, H, lam, gamma, T_K, KB_CM, FS_TO_CM, Nk=1, depth=3):
                          Nk=Nk, depth=depth)
     A = solver.rhs(0).full()
     d = H.shape[0]
-    return A, dict(d=d, n_ados=solver._n_ados, n=A.shape[0], solver=solver)
+    scale = None
+    if scale_ados:
+        # Aehnlichkeitstransformation A -> D^-1 A D mit D = diag(scale).
+        # Exakt, veraendert die Dynamik also nicht -- nur die Koordinaten.
+        scale = ado_scaling(solver, d)
+        A = A * (scale[None, :] / scale[:, None])
+    return A, dict(d=d, n_ados=solver._n_ados, n=A.shape[0], solver=solver,
+                   ado_scale=scale)
 
 
 # --------------------------------------------------------------------------
@@ -107,19 +148,28 @@ def contraction_gauge(A, *, delta, Q=None):
     ||P~||_2 <= exp(delta*dt) from above and cond(W) ~ 1/delta from below, so
     it trades the residual post-selection loss exp(2*delta*T) over the whole
     run against the conditioning of the classical basis change.
+
+    Zur Kondition: `eigh` loest Eigenwerte nur bis zu einer ABSOLUTEN
+    Genauigkeit eps*lambda_max auf, alles darunter ist Rauschen.  Sobald
+    cond(W) an 1/eps ~ 1e16 herankommt, wird W^(-1/2) also aus Muell gebaut.
+    Genau davor schuetzt die ADO-Umskalierung (`scale_ados=True`), die cond(W)
+    um viele Groessenordnungen drueckt; der Selbsttest in build_grid zeigt an,
+    wenn es trotzdem nicht reicht.
     """
     n = A.shape[0]
     if Q is None:
         Q = np.eye(n, dtype=complex)
     Ad = A - delta * np.eye(n)
-    # scipy solves  a x + x a^H = q; with a = Ad^dag this is Ad^dag W + W Ad = -Q
+    # scipy solves  a x + x a^dagger = q; with a = Ad^dag this is Ad^dag W + W Ad = -Q
     W = solve_continuous_lyapunov(Ad.conj().T, -Q)
-    W = 0.5 * (W + W.conj().T)
+    W = 0.5 * (W + W.conj().T)  # W ist schon hermitsch aber dass stellt das nochmal sicher wegen numerik
     w, V = eigh(W)
     if w.min() <= 0:
         raise np.linalg.LinAlgError(
             f"Lyapunov solution not positive definite (min eig {w.min():.3e}); "
-            "increase delta or check that A is power bounded.")
+            "increase delta, switch on scale_ados, or check that A is power "
+            "bounded -- a truncated HEOM hierarchy can genuinely be unstable "
+            "(eigenvalues with Re > 0), and then no W exists at all.")
     Wh = (V * np.sqrt(w)) @ V.conj().T
     Wih = (V / np.sqrt(w)) @ V.conj().T
     info = dict(delta=delta, eig_min=float(w.min()), eig_max=float(w.max()),
@@ -162,14 +212,14 @@ def arnoldi(P, x0, m):
     return H[:mm, :mm], Qb[:, :mm]
 
 
-def safe_norm2(M):
+def safe_norm2(A):
     """Spectral norm, or nan if the SVD cannot converge.
 
     At the conditioning where the gauge breaks down (cond(W) ~ 1e19 for the
     strongly coupled model) LAPACK's SVD itself fails, so the validity check
     must not depend on it succeeding."""
     try:
-        return float(np.linalg.norm(M, 2))
+        return float(np.linalg.norm(A, 2))
     except np.linalg.LinAlgError:
         return float('nan')
 
@@ -199,7 +249,7 @@ def dilate(M, s=None):
 # --------------------------------------------------------------------------
 
 def build_grid(dt_fs, *, rho0, delta=2.0, m=64, depth=3, Nk=1, verbose=True,
-               **MODEL):
+               scale_ados=False, **MODEL):
     """Everything the grid needs, from the model parameters alone.
 
     Returns a dict with
@@ -214,33 +264,32 @@ def build_grid(dt_fs, *, rho0, delta=2.0, m=64, depth=3, Nk=1, verbose=True,
     D = d * d
     dt_cm = dt_fs * MODEL['FS_TO_CM']
 
-    A, info = heom_generator(depth=depth, Nk=Nk, **MODEL)
+    A, info = heom_generator(depth=depth, Nk=Nk, scale_ados=scale_ados, **MODEL)
     if verbose:
         print(f"  A: {info['n']} x {info['n']} ({info['n_ados']} ADOs)", flush=True)
 
-    Wh, Wih, ginfo = contraction_gauge(A, delta=delta)
+    Wh, Wih, gauge_info = contraction_gauge(A, delta=delta)
     Pt, P = gauged_propagator(A, dt_cm, Wh, Wih)
+    norm_Pt = safe_norm2(Pt)
 
-    # Free validity check.  The gauge GUARANTEES ||P~||_2 <= exp(delta*dt); the
-    # bound is saturated to six digits when the arithmetic holds up.  Exceeding
+    # Free validity check.  The gauge GUARANTEES ||P~||_2 <= exp(delta*dt); Exceeding
     # it means W^(1/2) and W^(-1/2) have lost precision -- forming W already
     # squares its condition number, so a strongly transient generator (large
     # ||P||_2) can push cond(W) past what float64 carries.  The dynamics is then
     # still right, but the post-selection probability collapses.
     bound = float(np.exp(delta * dt_cm))
-    norm_Pt = safe_norm2(Pt)
-    ginfo.update(bound=bound, norm_P=safe_norm2(P), norm_Pt=norm_Pt,
+    gauge_info.update(bound=bound, norm_P=safe_norm2(P), norm_Pt=norm_Pt,
                  trustworthy=bool(norm_Pt <= bound * (1 + 1e-6)))
     if verbose:
-        print(f"  gauge delta={delta} cm^-1: cond(W)={ginfo['cond']:.2e}, "
-              f"||P||={ginfo['norm_P']:.4f} -> ||P~||={norm_Pt:.6f} "
+        print(f"  gauge delta={delta} cm^-1: cond(W)={gauge_info['cond']:.2e}, "
+              f"||P||={gauge_info['norm_P']:.4f} -> ||P~||={norm_Pt:.6f} "
               f"(bound {bound:.6f})", flush=True)
-    if not ginfo['trustworthy']:
+    if not gauge_info['trustworthy']:
         import warnings
         warnings.warn(
             f"gauge lost precision: ||P~||_2 = {norm_Pt:.4g} exceeds the "
             f"guaranteed bound exp(delta*dt) = {bound:.6g} by a factor "
-            f"{norm_Pt / bound:.3g}. cond(W) = {ginfo['cond']:.2e} is too large "
+            f"{norm_Pt / bound:.3g}. cond(W) = {gauge_info['cond']:.2e} is too large "
             f"for float64. Raise delta, shrink dt, or reduce the transient "
             f"growth of the generator; the post-selection probability from this "
             f"grid is not usable.", RuntimeWarning, stacklevel=2)
@@ -266,7 +315,7 @@ def build_grid(dt_fs, *, rho0, delta=2.0, m=64, depth=3, Nk=1, verbose=True,
 
     return dict(U=U, s=s, m=m, mp=mp, n_qubits=int(np.log2(mp)) + 1,
                 y0=y0, R=R, Hm=Hm, Qm=Qm, Wh=Wh, Wih=Wih, A=A, P=P, Pt=Pt,
-                d=d, D=D, dt_fs=dt_fs, dt_cm=dt_cm, gauge=ginfo, heom=info)
+                d=d, D=D, dt_fs=dt_fs, dt_cm=dt_cm, gauge=gauge_info, heom=info)
 
 
 # --------------------------------------------------------------------------
@@ -293,10 +342,24 @@ def reference_trajectory(grid, n_steps, exact=False):
         return np.array(out)
     y = grid['y0'].copy()
     out = [pops_from_y(y, R, d)]
+
     for _ in range(n_steps):
         y = grid['Hm'] @ y
         out.append(pops_from_y(y, R, d))
+        
     return np.array(out)
+
+
+def qutip_reference_rho(t_fs, *, rho0, depth=3, Nk=1, **MODEL):
+    """Wie `qutip_reference`, gibt aber die VOLLE Dichtematrix zurueck.
+
+    Returns (len(t_fs), d, d) komplex -- fuer den Vergleich der Kohaerenzen,
+    nicht nur der Populationen.
+    """
+    solver = make_solver(H=MODEL['H'], lam=MODEL['lam'], gamma=MODEL['gamma'],
+                         T_K=MODEL['T_K'], KB_CM=MODEL['KB_CM'], Nk=Nk, depth=depth)
+    res = solver.run(qt.Qobj(np.asarray(rho0)), np.asarray(t_fs) * MODEL['FS_TO_CM'])
+    return np.array([st.full() for st in res.states])
 
 
 def qutip_reference(t_fs, *, rho0, depth=3, Nk=1, **MODEL):
@@ -434,3 +497,4 @@ def regrid(grid, m, *, rho0=None, verbose=False):
         print(f"  m={m} -> {out['n_qubits']} qubits, "
               f"||H_m||={np.linalg.norm(Hm, 2):.6f}", flush=True)
     return out
+
