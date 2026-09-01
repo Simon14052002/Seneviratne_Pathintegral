@@ -65,7 +65,8 @@ Pipeline
 
 import numpy as np
 import qutip as qt
-from scipy.linalg import expm, solve_continuous_lyapunov, eigh, sqrtm
+from scipy.linalg import (expm, solve_continuous_lyapunov, eigh, sqrtm,
+                          schur, get_lapack_funcs)
 from qutip.solver.heom import HEOMSolver, DrudeLorentzPadeBath
 
 
@@ -116,7 +117,7 @@ def ado_scaling(solver, d):
 
 
 def heom_generator(*, H, lam, gamma, T_K, KB_CM, FS_TO_CM, Nk=1, depth=3,
-                   scale_ados=False):
+                   scale_ados=True):
     """The full HEOM generator A on the system+ADO space.
 
     Returns (A, info).  A is n x n with n = n_ados * d^2; the first d^2
@@ -141,7 +142,22 @@ def heom_generator(*, H, lam, gamma, T_K, KB_CM, FS_TO_CM, Nk=1, depth=3,
 # 2.  the contraction gauge
 # --------------------------------------------------------------------------
 
-def contraction_gauge(A, *, delta, Q=None):
+def lyapunov_schur(A):
+    """Schur-Zerlegung von A^dagger, wiederverwendbar fuer beliebige delta.
+
+    Bartels-Stewart loest (LYAP), indem es a = A^dag - delta I auf Schur-Form
+    bringt und dann eine Dreiecksgleichung loest.  Der Shift delta I aendert die
+    Schur-VEKTOREN nicht, nur die Diagonale von T.  Fuer einen Sweep ueber viele
+    delta rechnet man die Zerlegung deshalb genau einmal und reicht sie als
+    `schur_factor` an `contraction_gauge` weiter.
+
+    Returns (T, Z) mit A^dagger = Z T Z^dagger, T obere Dreiecksmatrix.
+    """
+    T, Z = schur(A.conj().T, output='complex')
+    return T, Z
+
+
+def contraction_gauge(A, *, delta, Q=None, schur_factor=None):
     """Solve (LYAP) and return the gauge matrices (Wh, Wih) = (W^1/2, W^-1/2).
 
     delta > 0 is a spectral shift in cm^-1.  It is the *only* knob: it bounds
@@ -155,13 +171,31 @@ def contraction_gauge(A, *, delta, Q=None):
     Genau davor schuetzt die ADO-Umskalierung (`scale_ados=True`), die cond(W)
     um viele Groessenordnungen drueckt; der Selbsttest in build_grid zeigt an,
     wenn es trotzdem nicht reicht.
+
+    `schur_factor` ist das Ergebnis von `lyapunov_schur(A)` und macht einen
+    delta-Sweep ueber demselben A rund zehnmal schneller -- der teure Teil des
+    Bartels-Stewart-Verfahrens, die Schur-Zerlegung, ist von delta unabhaengig.
     """
     n = A.shape[0]
     if Q is None:
         Q = np.eye(n, dtype=complex)
-    Ad = A - delta * np.eye(n)
-    # scipy solves  a x + x a^dagger = q; with a = Ad^dag this is Ad^dag W + W Ad = -Q
-    W = solve_continuous_lyapunov(Ad.conj().T, -Q)
+    if schur_factor is None:
+        Ad = A - delta * np.eye(n)
+        # scipy loest  a x + x a^dagger = q; mit a = Ad^dag ist das Ad^dag W + W Ad = -Q
+        W = solve_continuous_lyapunov(Ad.conj().T, -Q)
+    else:
+        # Schneller Pfad fuer delta-Sweeps.  Die Schur-Zerlegung von A^dagger
+        # haengt NICHT von delta ab:  Schur(A^dag - delta I) = Z (T - delta I) Z^dag
+        # mit denselben Schur-Vektoren.  Also einmal `lyapunov_schur(A)` rechnen und
+        # danach je delta nur noch die dreiecksgestellte Sylvester-Gleichung loesen.
+        T, Z = schur_factor
+        Td = T - delta * np.eye(n)
+        Qp = Z.conj().T @ Q @ Z
+        trsyl, = get_lapack_funcs(('trsyl',), (Td, Qp))
+        Y, scl, inf = trsyl(Td, Td, -Qp, trana='N', tranb='C', isgn=1)
+        if inf < 0:
+            raise np.linalg.LinAlgError(f"trsyl: ungueltiges Argument {-inf}")
+        W = Z @ (Y / scl) @ Z.conj().T
     W = 0.5 * (W + W.conj().T)  # W ist schon hermitsch aber dass stellt das nochmal sicher wegen numerik
     w, V = eigh(W)
     if w.min() <= 0:
@@ -477,12 +511,12 @@ def regrid(grid, m, *, rho0=None, verbose=False):
     initial state; the gauge W is unchanged.
     """
     if rho0 is None:
-        xt0 = grid['Qm'][:, 0] * np.linalg.norm(grid['y0'])
-    else:
+        xt0 = grid['Qm'][:, 0] * np.linalg.norm(grid['y0'])  # 0-te Spalte von Qm ist 0-ter Basisvektor der Krylovbasis = normierter Anfagszustand -> mit norm multiplizieren um echten anfangszustand zu bekommen
+    else:                                                    # y0 ist so lange wie es krylovdimension m gibt
         x0 = np.zeros(grid['Wh'].shape[0], complex)
         x0[:grid['D']] = np.asarray(rho0, complex).flatten(order='F')
         xt0 = grid['Wh'] @ x0
-    Hm, Qm = arnoldi(grid['Pt'], xt0, m)
+    Hm, Qm = arnoldi(grid['Pt'], xt0, m)    # arnoldi wird erneut gemacht aber mit kleinerem m
     m = Hm.shape[0]
     mp = 2 ** int(np.ceil(np.log2(m)))
     Apad = np.zeros((mp, mp), complex)

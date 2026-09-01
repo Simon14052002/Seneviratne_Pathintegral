@@ -412,142 +412,110 @@ def counts_readout_cost(grid, times, shots=None, verbose=True):
 
 
 def run_grid_counts(grid, n_steps, *, shots=8192, save_every=1, verbose=True):
-    """Populationen AUSSCHLIESSLICH aus Zaehlraten -- kein Statevector.
+    """Populationen AUSSCHLIESSLICH aus Zaehlraten -- kein Statevector."""
+    # --- 1. Parameter und Dimensionen aus dem Grid-Dictionary extrahieren ---
+    d, m, s, R = grid['d'], grid['m'], grid['s'], grid['R']                     # d: Anzahl Sites, m: Krylov-Dim, s: Dilatationsfaktor, R: Rekonstruktionsmatrix
+    mp, U = grid['mp'], grid['U']                                               # mp: gepaddete Dimension (2^n_sys), U: unitäre Dilatationsmatrix
+    n_sys = int(np.log2(mp))                                                    # Anzahl Qubits im Systemregister
+    gate = UnitaryGate(U, label='U')                                            # Dilatationsgatter U als Qiskit-Gatterobjekt instanziieren
+    scale0 = np.linalg.norm(grid['y0'])                                         # Euklidische Norm des Anfangszustands ||y_0||
+    sim = AerSimulator()                                                        # Initialisiert den hardwarenahen Aer-Schuss-Simulator
 
-    Das Markovsche Analogon (`propagate_stinespring_shots`) funktioniert, weil das
-    Systemregister dort direkt rho_S traegt: |psi_i|^2 = rho_ii, die Zaehlraten
-    SIND die Populationen.  Hier traegt das Register y_t in der Krylov-Basis, und
-    vec rho_S = R y_t ist LINEAR in y_t -- Zaehlraten liefern aber nur |y_i|^2.
-
-    Ausweg.  Sei r_j die Zeile von R, die rho_jj herausgreift, also
-    p_j = lambda_t (r_j . y_t).  Praepariert man |chi_j> = r_j^dag/||r_j|| und
-    dreht ihn mit B_j^dag auf |0...0>, so ist die gemessene Rate im Nullzustand
-        q_j = |<chi_j|y_t>|^2 = (r_j . y_t)^2 / ||r_j||^2,
-    und weil rho_S hermitesch und positiv semidefinit ist, ist r_j . y_t reell
-    und >= 0 -- die Wurzel ist eindeutig.  Die unbekannte globale Phase von y_t
-    faellt im Betragsquadrat heraus, es braucht also keine Phaseneichung mehr.
-
-        p_j = ||r_j|| * sqrt(q_j) * ||y_0|| * s^t * sqrt(p_t)
-
-    Kosten: d Schaltkreise pro Auslesezeit (einer je Site) statt einem.  Dafuer
-    ist nichts mehr am Simulator abgelesen -- das laeuft auf Hardware.
-
-    Returns
-    -------
-    pops     : spur-normierte Populationen, Sum_j p_j = 1 per Konstruktion.
-               Das kuerzt lambda_t heraus und macht "Spur 0" oder "Spur 3"
-               strukturell unmoeglich -- beides trat auf, solange jede
-               Population einzeln ueber lambda_t ~ 730 skaliert wurde und ein
-               einzelner Ausreisser-Count entsprechend hochgezogen wurde.
-    pops_err : 1-sigma-Statistikfehler dazu.
-    info     : u.a. `q` (die gemessenen Ueberlappe), `pops_abs` (die absolute
-               Variante ueber lambda_t) und `p_success`.
-
-    Wieviele Shots?  Der relative Fehler ist etwa 1/(2*sqrt(q_j * N_acc)).
-    Gemessen fuer das 4-Site-FMO-Gitter (delta=0.02, OHNE ADO-Skalierung):
-    q ~ 0.01...0.1, also 2.5e-02 Genauigkeit bei 8192 Shots und ~1e6...1e7 Shots
-    fuer 1e-3.  Die Voreinstellung 8192 ist eine Demo-Einstellung, keine
-    Produktionseinstellung.
-
-    ACHTUNG, kontraintuitiv: fuer DIESE Ableseroute will man das Gitter OHNE
-    `scale_ados`.  Die ADO-Skalierung rettet zwar die Kontraktion, verschlechtert
-    aber die Ueberlappe um fuenf Groessenordnungen (q von 1e-2 auf 1e-8, also
-    1e11 statt 1e6 Shots) -- sie dreht den Winkel zwischen Registerzustand und
-    Auslesefunktional ungueenstig.  Dahinter steht, dass nur ~5e-4 der Laenge von
-    Sigma ueberhaupt der Systemblock ist; das Signal ist intrinsisch ein winziger
-    Anteil des Registers, und eine Projektionsmessung zahlt das mit N ~ 1/q.
-    Der prinzipielle Ausweg waere Amplitudenschaetzung (N ~ 1/sqrt(q)), hier
-    nicht implementiert.
-    """
-    d, m, s, R = grid['d'], grid['m'], grid['s'], grid['R']
-    mp, U = grid['mp'], grid['U']
-    n_sys = int(np.log2(mp))
-    gate = UnitaryGate(U, label='U')
-    scale0 = np.linalg.norm(grid['y0'])
-    sim = AerSimulator()
-
-    rows = [R[j + d * j, :] for j in range(d)]          # Spaltenstapelung: rho_jj
-    nrm = np.array([np.linalg.norm(r) for r in rows])
-    Bdag = []
+    # --- 2. Auslese-Operatoren B_j^dag für jede Site j vorbereiten ---
+    rows = [R[j + d * j, :] for j in range(d)]                                  # Greift Zeilen für Diagonaleinträge rho_jj aus Matrix R heraus
+    nrm = np.array([np.linalg.norm(r) for r in rows])                           # Berechnet die Euklidische Norm ||r_j|| für jeden Zeilenvektor
+    Bdag = []                                                                   # Liste für die Basis-Rotationsgatter B_j^dag aller d Sites
     for r in rows:
-        chi = np.zeros(mp, complex)
-        chi[:m] = r.conj() / np.linalg.norm(r)
-        Bdag.append(UnitaryGate(_prep_unitary(chi).conj().T, label='B'))
+        chi = np.zeros(mp, complex)                                             # Nullvektor im gepaddeten 2^n_sys-Hilbertraum anlegen
+        chi[:m] = r.conj() / np.linalg.norm(r)                                  # Zielzustand |chi_j> = r_j^dag / ||r_j|| auf den Krylov-Teilraum setzen
+        Bdag.append(UnitaryGate(_prep_unitary(chi).conj().T, label='B'))        # B_j^dag berechnen: dreht Zustand |chi_j> exakt auf den Nullzustand |0...0>
 
-    times = [0] + [t for t in range(1, n_steps + 1)
+    # --- 3. Liste der Auswerte-Zeitschritte generieren ---
+    times = [0] + [t for t in range(1, n_steps + 1)                             # Zeitpunkte: t=0 plus alle Vielfachen von save_every sowie Endzeitpunkt
                    if t % save_every == 0 or t == n_steps]
 
     # Vorabdiagnose, bevor irgendein Schaltkreis laeuft
-    counts_readout_cost(grid, times, shots=shots, verbose=verbose)
+    counts_readout_cost(grid, times, shots=shots, verbose=verbose)              # Gibt Ressourcenabschätzung und theoretische Shot-Kosten aus
 
-    pops       = np.full((len(times), d), np.nan)
-    pops_err   = np.full((len(times), d), np.nan)
-    pops_n     = np.full((len(times), d), np.nan)
-    pops_n_err = np.full((len(times), d), np.nan)
-    qtab       = np.full((len(times), d), np.nan)
-    prob = np.full(len(times), np.nan)
-    prob_err = np.zeros(len(times))
+    # --- 4. Speicher-Arrays für Ergebnisse allokieren ---
+    pops       = np.full((len(times), d), np.nan)                               # Absolute Populationen über Skalierungsfaktor lambda_t
+    pops_err   = np.full((len(times), d), np.nan)                               # Statistischer Fehler der absoluten Populationen
+    pops_n     = np.full((len(times), d), np.nan)                               # Spur-normierte Populationen (Sum_j p_j = 1)
+    pops_n_err = np.full((len(times), d), np.nan)                               # Statistischer Fehler der spur-normierten Populationen
+    qtab       = np.full((len(times), d), np.nan)                               # Gemessene Projektionswahrscheinlichkeiten q_j
+    prob = np.full(len(times), np.nan)                                          # Post-Selection-Wahrscheinlichkeiten p_total(t)
+    prob_err = np.zeros(len(times))                                             # Fehler von p_total(t)
 
+    # --- 5. Hauptschleife über alle Zeitschritte t ---
     for k, t in enumerate(times):
-        row, row_err = np.zeros(d), np.zeros(d)
-        qs, qerr, nacc = np.zeros(d), np.zeros(d), np.zeros(d, dtype=int)
+        row, row_err = np.zeros(d), np.zeros(d)                                 # Puffer für Populationswerte und Fehler zur aktuellen Zeit t
+        qs, qerr, nacc = np.zeros(d), np.zeros(d), np.zeros(d, dtype=int)       # Puffer für q_j, dq_j und Anzahl akzeptierter Shots je Site
+        
+        # --- Unterschleife: Ein separater Circuit für jede Site j ---
         for j in range(d):
-            q_sys = QuantumRegister(n_sys, 'krylov')
-            q_anc = QuantumRegister(1, 'anc')
-            c = ClassicalRegister(t + n_sys, 'c')       # Bits 0..t-1: Protokoll
-            qc = QuantumCircuit(q_sys, q_anc, c)        # Bits t..: Ausgang
+            q_sys = QuantumRegister(n_sys, 'krylov')                            # Systemregister für den Krylov-Zustand anlegen
+            q_anc = QuantumRegister(1, 'anc')                                   # 1 Ancilla-Qubit für die Sz.-Nagy-Dilatation
+            c = ClassicalRegister(t + n_sys, 'c')                               # Bits 0..t-1: Ancilla-Protokoll, Bits t..t+n_sys-1: Systemausgang
+            qc = QuantumCircuit(q_sys, q_anc, c)                                # Quantenschaltkreis mit System- und Ancillaregistern aufbauen
 
+            # Dynamik über t Schritte ausführen
             for step in range(t):
-                qc.append(gate, q_sys[:] + q_anc[:])
-                qc.measure(q_anc[0], c[step])
-                qc.reset(q_anc[0])
+                qc.append(gate, q_sys[:] + q_anc[:])                            # Dilatations-Unitary U auf System + Ancilla anwenden
+                qc.measure(q_anc[0], c[step])                                   # Ancilla-Zustand in Bit 'step' messen (Dissipationskanal)
+                qc.reset(q_anc[0])                                              # Ancilla für den nächsten Zeitschritt auf |0> zurücksetzen
 
-            qc.append(Bdag[j], q_sys[:])
+            qc.append(Bdag[j], q_sys[:])                                        # Basisdrehung B_j^dag anwenden (dreht |chi_j> auf |0...0>)
 
             for i in range(n_sys):
-                qc.measure(q_sys[i], c[t + i])
+                qc.measure(q_sys[i], c[t + i])                                  # Alle Systemqubits in die Bits t bis t+n_sys-1 messen
 
-            counts = sim.run(transpile(qc, sim), shots=shots).result().get_counts()
-            acc = zero = 0
+            # Schaltung ausführen und Zählraten holen
+            counts = sim.run(transpile(qc, sim), shots=shots).result().get_counts()  # Kompiliert und sammelt alle gemessenen Bitstrings
+            acc = zero = 0                                                      # acc: überlebte Shots (Post-Selection), zero: Shots im Systemzustand |0...0>
 
+            # Auswertung der Bitstrings
             for bits, n in counts.items():
-                b = bits.replace(' ', '')[::-1]          # b[0] = c[0]
-                if set(b[:t]) <= {'0'}:
-                    acc += n
-                    if set(b[t:t + n_sys]) <= {'0'}:
-                        zero += n
-            if acc == 0:
-                break
+                b = bits.replace(' ', '')[::-1]                                 # Umkehren: Big-Endian von Qiskit in zeitliche Reihenfolge wandeln (b[0]=c[0])
+                if set(b[:t]) <= {'0'}:                                         # Post-Selection: Waren alle Ancilla-Messungen 0..t-1 gleich '0'?
+                    acc += n                                                    # Shot hat die Post-Selection überlebt
+                    if set(b[t:t + n_sys]) <= {'0'}:                            # Prüfen, ob auch alle Systemqubits '0' gemessen haben (|0...0>)
+                        zero += n                                               # Erfolgreiche Projektion auf den Zielzustand |chi_j>
+            if acc == 0:                                                        # Falls kein einziger Shot überlebt hat:
+                break                                                           # Zeitschritt abbrechen (Kollaps in den Verlustzweig)
             
+            # Post-Selection-Statistik (beim 1. Durchlauf j=0 bestimmen)
             if j == 0:
-                prob[k] = acc / shots
-                prob_err[k] = (np.sqrt(prob[k] * (1 - prob[k]) / shots)
-                               if 0 < acc < shots else 3.0 / shots)
+                prob[k] = acc / shots                                           # Empirische Post-Selection-Wahrscheinlichkeit p_total = N_acc / N_shots
+                prob_err[k] = (np.sqrt(prob[k] * (1 - prob[k]) / shots)         # Binomialfehler für p_total berechnen
+                               if 0 < acc < shots else 3.0 / shots)             # Bei Extremwerten: Poisson-/Rule-of-Three-Obergrenze 3/N
                 if t == 0:
-                    prob_err[k] = 0.0
-            q = zero / acc
-            # Bei 0 Counts NICHT einfach 0 melden -- das ist eine Nachweisgrenze,
-            # keine Messung.  Die 95-%-Obergrenze ist 3/acc.
-            dq = np.sqrt(q * (1 - q) / acc) if 0 < zero < acc else 3.0 / acc
-            qs[j], qerr[j], nacc[j] = q, dq, acc
-            row[j] = nrm[j] * np.sqrt(q) * scale0 * s ** t * np.sqrt(prob[k])
-            rel = np.hypot(dq / (2 * q) if q > 0 else 0.0,
-                           prob_err[k] / (2 * prob[k]) if prob[k] > 0 else 0.0)
-            row_err[j] = row[j] * rel
+                    prob_err[k] = 0.0                                           # Bei t=0 ist p_total per Definition exakt 1.0 (kein Fehler)
+            
+            # Projektionswahrscheinlichkeit q_j berechnen
+            q = zero / acc                                                      # Bedingte Wahrscheinlichkeit q_j = N_zero / N_acc
+            dq = np.sqrt(q * (1 - q) / acc) if 0 < zero < acc else 3.0 / acc    # Binomialfehler von q_j (oder 3/N_acc bei 0 Counts als Obergrenze)
+            qs[j], qerr[j], nacc[j] = q, dq, acc                                # Werte im lokalen Array für Diagnose und Ausgabe ablegen
+            
+            # Physikalische Population rho_jj über Multiplikationskette rekonstruieren
+            row[j] = nrm[j] * np.sqrt(q) * scale0 * s ** t * np.sqrt(prob[k])   # p_j = ||r_j|| * sqrt(q_j) * ||y0|| * s^t * sqrt(p_total)
+            rel = np.hypot(dq / (2 * q) if q > 0 else 0.0,                      # Gaußsche Fehlerfortpflanzung: relativer Fehler von sqrt(q) und sqrt(p)
+                           prob_err[k] / (2 * prob[k]) if prob[k] > 0 else 0.0) # Delta(sqrt(x))/sqrt(x) = Delta(x) / (2x), quadratisch addiert
+            row_err[j] = row[j] * rel                                           # Absoluten 1-Sigma-Fehler der Population berechnen
         else:
-            pops[k], pops_err[k] = row, row_err
-            # Spur-normierte Variante: Sum_j p_j = 1 ist exakt bekannt, also
-            # teilt man durch die gemessene Summe.  Das kuerzt lambda_t und alle
-            # gemeinsamen multiplikativen Fehler heraus -- und macht "Spur 0"
-            # oder "Spur 3" strukturell unmoeglich.
-            tot_row = row.sum()
+            # Wird ausgeführt, wenn die for-Schleife über alle d Sites ohne break durchlief
+            pops[k], pops_err[k] = row, row_err                                 # Absolute Populationswerte sichern
+            
+            # Spur-Normierung: Nutzt das physikalische Axiom Sum_j rho_jj = 1
+            tot_row = row.sum()                                                 # Summe aller gemessenen Diagonalelemente bilden
             if tot_row > 0:
-                pops_n[k] = row / tot_row
-                pops_n_err[k] = row_err / tot_row      # gemeinsamer Faktor faellt raus
-            qtab[k] = qs
+                pops_n[k] = row / tot_row                                       # Normieren: p_norm_j = p_j / sum(p) -> eliminiert gemeinsamen Faktor lambda_t
+                pops_n_err[k] = row_err / tot_row                               # Fehler skalieren (multiplikative Unsicherheiten kürzen sich heraus)
+            qtab[k] = qs                                                        # Gemessene q-Werte im Verlaufstabellen-Array sichern
+            
+            # Ausführliche Logging- und Diagnoseausgabe
             if verbose:
-                nmin = int(qs.min() * nacc.min())
-                rel = (1.0 / (2 * np.sqrt(max(nmin, 1)))) if nmin else np.nan
+                nmin = int(qs.min() * nacc.min())                               # Minimal gezählte Zero-Events über alle Sites
+                rel = (1.0 / (2 * np.sqrt(max(nmin, 1)))) if nmin else np.nan  # Erwarteter statistischer Relativfehler basierend auf Poisson-Rauschen
                 print(f"  t={t:4d}  p_succ={prob[k]:.4f}  Spur={tot_row:.4f}  "
                       f"q={np.array2string(qs, precision=2)}  "
                       f"min Counts={nmin}  -> erwartete rel. Genauigkeit "
@@ -556,10 +524,268 @@ def run_grid_counts(grid, n_steps, *, shots=8192, save_every=1, verbose=True):
                       f"q={np.array2string(qs, precision=2)}  "
                       f"min Counts=0 (unter der Nachweisgrenze)", flush=True)
             continue
-        break
+        break                                                                   # Bricht die äußere Schleife ab, falls acc == 0 aufgetreten ist
 
+    # --- 6. Rückgabe-Dictionary mit allen Metadaten zusammenstellen ---
     info = dict(t_index=np.array(times), p_success=prob, p_success_err=prob_err,
                 shots=shots, n_qubits=grid['n_qubits'], m=m, s=s,
                 circuits_per_time=d, q=qtab,
                 pops_abs=pops, pops_abs_err=pops_err)
-    return pops_n, pops_n_err, info
+    return pops_n, pops_n_err, info                                             # Gibt spur-normierte Populationen, Fehler und Metadaten zurück
+
+def _measure_overlap(grid, v, t, shots, sim, gate):
+    """Ein Analysevektor v: dreht chi = v^dag/||v|| auf |0...0> und misst.
+
+    Liefert (q, dq, acc, ||v||) mit q = |<chi|y_t>|^2, geschaetzt aus den
+    Zaehlraten der Shots, die die Post-Selection ueberlebt haben.
+    """
+    mp, m = grid['mp'], grid['m']
+    n_sys = int(np.log2(mp))
+    nv = np.linalg.norm(v)
+    chi = np.zeros(mp, complex); chi[:m] = np.conj(v) / nv
+
+    q_sys = QuantumRegister(n_sys, 'krylov')
+    q_anc = QuantumRegister(1, 'anc')
+    c = ClassicalRegister(t + n_sys, 'c')
+    qc = QuantumCircuit(q_sys, q_anc, c)
+    for step in range(t):
+        qc.append(gate, q_sys[:] + q_anc[:])
+        qc.measure(q_anc[0], c[step])
+        qc.reset(q_anc[0])
+    qc.append(UnitaryGate(_prep_unitary(chi).conj().T), q_sys[:])
+    for i in range(n_sys):
+        qc.measure(q_sys[i], c[t + i])
+
+    counts = sim.run(transpile(qc, sim), shots=shots).result().get_counts()
+    acc = zero = 0
+    for bits, n in counts.items():
+        b = bits.replace(' ', '')[::-1]
+        if set(b[:t]) <= {'0'}:
+            acc += n
+            if set(b[t:t + n_sys]) <= {'0'}:
+                zero += n
+    if acc == 0:
+        return None, None, 0, nv
+    q = zero / acc
+    dq = np.sqrt(q * (1 - q) / acc) if 0 < zero < acc else 3.0 / acc
+    return q, dq, acc, nv
+
+
+def run_grid_counts_offdiagonal(grid, n_steps, pairs=None, *, shots=8192,
+                                save_every=1, verbose=True):
+    """Off-Diagonalterme aus Zaehlraten, ueber die ++/RR-Basisrotation.
+
+    Idee (klassisch gegengeprueft auf 1.2e-13)
+    ------------------------------------------
+    rho_ab ist komplex, ein Betragsquadrat verliert also die Phase.  Statt mit
+    einer Referenz zu interferieren, misst man die Populationen in den GEDREHTEN
+    Basen |+> = (|a>+|b>)/sqrt(2) und |R> = (|a> - i|b>)/sqrt(2):
+
+        rho_++ = <+|rho|+> = (rho_aa + rho_bb)/2 + Re(rho_ab)
+        rho_RR = <R|rho|R> = (rho_aa + rho_bb)/2 + Im(rho_ab)
+
+    Beides sind ECHTE Besetzungswahrscheinlichkeiten, also reell und >= 0 -- die
+    Wurzel aus dem gemessenen q ist damit wieder eindeutig, und die unbekannte
+    globale Phase von y_t faellt im Betragsquadrat heraus.  Es braucht keine
+    Phasenreferenz.  Die zugehoerigen Zeilen folgen aus der Linearitaet von
+    vec rho_S = R y_t:
+
+        r_++ = (r_aa + r_bb + r_ab + r_ba)/2
+        r_RR = (r_aa + r_bb - i r_ab + i r_ba)/2
+
+    Danach klassisch:
+        Re(rho_ab) = rho_++ - (rho_aa + rho_bb)/2
+        Im(rho_ab) = rho_RR - (rho_aa + rho_bb)/2
+
+    Kosten und Fehler
+    -----------------
+    d + 2*len(pairs) Schaltkreise pro Auslesezeit -- fuer d=4 und zwei Paaren
+    also 8.  Das ist billiger als die Interferenzvariante in
+    `run_grid_counts_rho` (die 3 Schaltkreise je Paar braucht) und statistisch
+    besser gestellt, weil hier nur Populationen voneinander abgezogen werden.
+
+    Die absoluten Fehler addieren sich quadratisch,
+        d Re(rho_ab) = sqrt( d rho_++^2 + (d rho_aa^2 + d rho_bb^2)/4 ),
+    also rund Faktor 1.22 gegenueber einer einzelnen Population, und damit
+    Faktor 1.5 in der noetigen Shot-Zahl -- nicht 2 bis 3, wie eine erste
+    Abschaetzung nahelegt, solange man ABSOLUTE Genauigkeit fordert.  Fordert man
+    relative Genauigkeit auf einer kleinen Kohaerenz, wird es entsprechend mehr.
+
+    Der Fehler einer einzelnen Population ist ||r|| * lambda_t / (2 sqrt(N p_t)),
+    also unabhaengig von q; die relevante Groesse ist die Verstaerkung
+    A = ||r|| * lambda_t (siehe `counts_readout_cost` und die Parameterstudie).
+    Wegen lambda_t = ||y0|| s^t sqrt(p_t) faellt sogar p_t heraus -- der Fehler in
+    TOTAL-Shots ist ||r|| ||y0|| s^t / (2 sqrt(N)), die Post-Selektion kostet hier
+    also nichts extra.
+
+    Der Fehler von Re und Im ist NICHT derselbe: ||r_++|| und ||r_RR|| koennen
+    sich um eine Groessenordnung unterscheiden (im Testmodell 2.9 gegen 31.2 fuer
+    das Paar (1,2), also Faktor 120 in der Shot-Zahl).  Die Shots werden deshalb
+    nach N_i ~ ||r_i|| auf die beiden Kanaele verteilt -- das Verhaeltnis braucht
+    nur die Normen, weil lambda_t beiden gemeinsam ist.  Mit
+    `offdiag_readout_cost` prueft man vorab, welche Paare sich lohnen: nicht das
+    billigste Paar gewinnt, sondern das mit dem besten Signal-Rausch-Verhaeltnis
+    -- das billigste hat meist auch die kleinste Kohaerenz.
+
+    Returns (rho, rho_err, info).  rho ist (len(times), d, d) komplex und absolut
+    skaliert, `rho_err` der Fehler des REALTEILS (und auf der Diagonale der
+    Population), `info['rho_err_im']` der des Imaginaerteils.
+    `info['rho_tr']` ist die spurnormierte Variante, `info['amplification']`
+    gibt je Paar (||r_++||, ||r_RR||).
+    """
+    d, m, s, R = grid['d'], grid['m'], grid['s'], grid['R']
+    gate = UnitaryGate(grid['U'], label='U')
+    sim = AerSimulator()
+    scale0 = np.linalg.norm(grid['y0'])
+    row = lambda i, j: R[i + d * j, :]
+
+    if pairs is None:
+        pairs = [(i, j) for i in range(d) for j in range(i + 1, d)]
+    times = [0] + [t for t in range(1, n_steps + 1)
+                   if t % save_every == 0 or t == n_steps]
+    if verbose:
+        print(f"  {d + 2 * len(pairs)} Schaltkreise pro Zeitpunkt "
+              f"({d} Diagonale + 2 x {len(pairs)} Paare), {len(times)} Zeitpunkte",
+              flush=True)
+
+    rho     = np.full((len(times), d, d), np.nan, complex)
+    rho_tr  = np.full((len(times), d, d), np.nan, complex)
+    rho_err = np.full((len(times), d, d), np.nan)
+    rho_err_im = np.full((len(times), d, d), np.nan)
+    prob    = np.full(len(times), np.nan)
+
+    for k, t in enumerate(times):
+        # 1. die Diagonale -- wird fuer die Subtraktion ohnehin gebraucht
+        pop, dpop, bad = np.zeros(d), np.zeros(d), False
+        for j in range(d):
+            q, dq, acc, nv = _measure_overlap(grid, row(j, j), t, shots, sim, gate)
+            if acc == 0:
+                bad = True; break
+            if j == 0:
+                prob[k] = acc / shots
+                lam = scale0 * s ** t * np.sqrt(prob[k])
+            pop[j] = nv * np.sqrt(q) * lam
+            dpop[j] = nv * lam / (2 * np.sqrt(acc))      # unabhaengig von q
+        if bad:
+            if verbose:
+                print(f"  Abbruch bei t={t}: keine akzeptierten Shots.")
+            break
+
+        M = np.diag(pop).astype(complex)
+        E = np.diag(dpop)
+        Eim = np.zeros((d, d))
+
+        # 2. die gedrehten Basen je Paar
+        for (a, b) in pairs:
+            r_pp = 0.5 * (row(a, a) + row(b, b) + row(a, b) + row(b, a))
+            r_RR = 0.5 * (row(a, a) + row(b, b) - 1j * row(a, b) + 1j * row(b, a))
+            # Shots nach Verstaerkung aufteilen.  A = ||r|| lambda_t, und lambda_t
+            # ist beiden Kanaelen gemeinsam -- das Verhaeltnis braucht also nur die
+            # Normen, keine klassische Propagation.  N_i ~ A_i minimiert die Summe
+            # der Varianzen bei festem Budget 2*shots.
+            n_pp, n_RR = np.linalg.norm(r_pp), np.linalg.norm(r_RR)
+            f = n_pp / (n_pp + n_RR)
+            N_pp = max(64, int(round(2 * shots * f)))
+            N_RR = max(64, 2 * shots - N_pp)
+            vals = []
+            for r, N in ((r_pp, N_pp), (r_RR, N_RR)):
+                q, dq, acc, nv = _measure_overlap(grid, r, t, N, sim, gate)
+                if acc == 0:
+                    bad = True; break
+                vals.append((nv * np.sqrt(q) * lam, nv * lam / (2 * np.sqrt(acc))))
+            if bad:
+                break
+            (p_pp, d_pp), (p_RR, d_RR) = vals
+            half = 0.5 * (pop[a] + pop[b])
+            re, im = p_pp - half, p_RR - half
+            quart = 0.25 * dpop[a] ** 2 + 0.25 * dpop[b] ** 2
+            M[a, b], M[b, a] = re + 1j * im, re - 1j * im
+            E[a, b] = E[b, a] = np.sqrt(d_pp ** 2 + quart)
+            Eim[a, b] = Eim[b, a] = np.sqrt(d_RR ** 2 + quart)
+        if bad:
+            break
+
+        rho[k], rho_err[k], rho_err_im[k] = M, E, Eim
+        tr = np.real(np.trace(M))
+        if tr > 0:
+            rho_tr[k] = M / tr
+        if verbose:
+            a0, b0 = pairs[0]
+            print(f"  t={t:4d}  p_succ={prob[k]:.4f}  Spur={tr:.4f}  "
+                  f"rho_{a0+1}{b0+1}={np.real(M[a0,b0]):+.4f}+-{E[a0,b0]:.4f} "
+                  f"{np.imag(M[a0,b0]):+.4f}i+-{Eim[a0,b0]:.4f}", flush=True)
+
+    info = dict(t_index=np.array(times), p_success=prob, shots=shots, pairs=pairs,
+                rho_tr=rho_tr, rho_err_im=rho_err_im, n_qubits=grid['n_qubits'],
+                m=m, s=s, circuits_per_time=d + 2 * len(pairs),
+                amplification={(a, b): (
+                    np.linalg.norm(0.5 * (row(a, a) + row(b, b)
+                                          + row(a, b) + row(b, a))),
+                    np.linalg.norm(0.5 * (row(a, a) + row(b, b)
+                                          - 1j * row(a, b) + 1j * row(b, a))))
+                    for (a, b) in pairs})
+    return rho, rho_err, info
+
+
+def offdiag_readout_cost(grid, pairs=None, *, eta=0.03, n_steps=50, shots=2048,
+                         by='snr', top=None):
+    """Was ein Off-Diagonalelement kostet, BEVOR man den Schaltkreis startet.
+
+    Die Verstaerkung A_t = ||r|| lambda_t bestimmt den absoluten Fehler
+    A_t / (2 sqrt(N p_t)), unabhaengig von q.  Wegen lambda_t = ||y0|| s^t
+    sqrt(p_t) kuerzt sich p_t heraus:
+
+        delta rho = ||r|| ||y0|| s^t / (2 sqrt(N)),   N = (||r|| ||y0|| s^t)^2
+                                                          / (4 eta^2),
+
+    die Post-Selection kostet fuer diese Ablesung also KEINE zusaetzlichen Shots
+    -- die Verstaerkung schrumpft genau so schnell wie die Akzeptanz.  Der
+    schlimmste Zeitpunkt ist t = n_steps, weil nur noch s^t waechst.
+
+    Kosten allein sind aber das falsche Kriterium: das billigste Paar ist oft
+    das, dessen Kohaerenz ohnehin fast null ist.  Massgeblich ist das
+    Signal-Rausch-Verhaeltnis
+
+        SNR = min_teil ( max_t |teil rho_ab(t)| ) / max(delta Re, delta Im)
+
+    bei gegebenem `shots` je Kanal.  Das Signal wird dafuer klassisch aus dem
+    Gitter selbst geschaetzt (m x m Matvecs, wie in `counts_readout_cost`) --
+    das ist Planung, keine Ablesung.  `by='snr'` sortiert danach, `by='cost'`
+    nach der Shot-Zahl.
+
+    Returns eine Liste ((a, b), A_++, A_RR, N_fuer_eta, SNR), sortiert.
+    """
+    d, R, Hm, y0, s = grid['d'], grid['R'], grid['Hm'], grid['y0'], grid['s']
+    row = lambda i, j: R[i + d * j, :]
+    if pairs is None:
+        pairs = [(i, j) for i in range(d) for j in range(i + 1, d)]
+
+    g = np.linalg.norm(y0) * s ** n_steps          # ||y0|| s^t, schlimmster Fall
+    Y = np.empty((n_steps + 1, len(y0)), complex)  # klassische Signalschaetzung
+    Y[0] = y0
+    for t in range(n_steps):
+        Y[t + 1] = Hm @ Y[t]
+
+    out = []
+    for (a, b) in pairs:
+        r_pp = 0.5 * (row(a, a) + row(b, b) + row(a, b) + row(b, a))
+        r_RR = 0.5 * (row(a, a) + row(b, b) - 1j * row(a, b) + 1j * row(b, a))
+        n_pp, n_RR = np.linalg.norm(r_pp), np.linalg.norm(r_RR)
+        App, Arr = n_pp * g, n_RR * g
+        N = max(App, Arr) ** 2 / (4 * eta ** 2)
+        # Shots werden im Lauf nach N_i ~ ||r_i|| verteilt
+        f = n_pp / (n_pp + n_RR)
+        e_re = App / (2 * np.sqrt(2 * shots * f))
+        e_im = Arr / (2 * np.sqrt(2 * shots * (1 - f)))
+        rab = Y @ row(a, b)
+        sig = min(np.abs(rab.real).max(), np.abs(rab.imag).max())
+        out.append(((a, b), App, Arr, N, sig / max(e_re, e_im)))
+
+    out.sort(key=(lambda r: -r[4]) if by == 'snr' else (lambda r: r[3]))
+    print(f"  Off-Diagonal-Auslesekosten ueber {n_steps} Schritte "
+          f"(sortiert nach {'SNR' if by == 'snr' else 'Kosten'})")
+    print(f"  {'Paar':>7} {'A(++)':>8} {'A(RR)':>8} "
+          f"{f'Shots|Fehler|<{eta:g}':>18} {f'SNR bei {shots}':>15}")
+    for (a, b), App, Arr, N, snr in out[:top]:
+        print(f"  {f'({a+1},{b+1})':>7} {App:8.2f} {Arr:8.2f} {N:18.3g} {snr:15.1f}")
+    return out
