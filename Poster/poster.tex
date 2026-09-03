@@ -452,26 +452,25 @@
 
   %---------------------------------------------------------------
   \begin{block}{Markovian Dynamics: Lindblad $\rightarrow$ Kraus}
-    Lindblad equation - the most general Markovian master equation:
+    Lindblad equation - the most general Markovian master equation. Uses Born, Markov and secular approximation:
     \[ \frac{d}{dt}\rho_S = \underbrace{-\tfrac{i}{\hbar}[H,\rho_S]}_{\text{unitary}}
-       + \underbrace{\sum_\alpha \gamma_\alpha \Big( L_\alpha \rho_S L^\dagger_\alpha
-         - \tfrac12 \{ L^\dagger_\alpha L_\alpha, \rho_S \} \Big)}_{\text{dissipator} \rightarrow \text{non-unitary}} := \mathcal{L} \rho_S \]
-    \why{$\gamma_\alpha$: transition rate $\rightarrow$ Fermi's golden rule.
-    $L_\alpha$: Lindblad operator $\rightarrow$ jump operator.}
+       + \underbrace{\sum_k \gamma_k \Big( L_k \rho_S L^\dagger_k
+         - \tfrac12 \{ L^\dagger_k L_k, \rho_S \} \Big)}_{\text{dissipator} \rightarrow \text{non-unitary}} := \mathcal{L} \rho_S \]
+    \why{$\gamma_k$: transition rate $\rightarrow$ Fermi's golden rule.
+    $L_k$: Lindblad operator $\rightarrow$ jump operator.}
 
     \textbf{Kraus operators directly from it.} For a small step $dt$ the
-    Ansatz $M_0=\mathbb{1}+L_0\,dt$, $M_\alpha=\sqrt{dt}\,L_\alpha$ and
-    $\sum_k M^\dagger_k M_k=\mathbb{1}$ fix $L_0$, which gives
+    Ansatz
     \[ M_0 = \mathbb{1} + \Big(-\tfrac{i}{\hbar}H
-             - \tfrac12\sum_\alpha \gamma_\alpha L^\dagger_\alpha L_\alpha\Big) dt,
-       \qquad M_\alpha = \sqrt{\gamma_\alpha\,dt}\;L_\alpha \]
-    \why{Exact only to $\mathcal{O}(dt)$ -- it forces small steps. The
-         algorithm therefore takes the route below, which is exact for
+             - \tfrac12\sum_k \gamma_k L^\dagger_k L_k\Big) dt,
+       \qquad M_k = \sqrt{\gamma_k\,dt}\;L_k \]
+    reproduces the Lindblad equation to $\mathcal{O}(dt)$
+    \why{Hence it forces small steps. The algorithm therefore takes the route below, 
+    which is exact for
          \emph{any} $t$.}
 
     \textbf{1. Vectorise} $\Rightarrow$ linear, integrable in closed form:
-    \[ \mathrm{vec}(\rho_S(t)) = e^{\mathcal{L}t}\,\mathrm{vec}(\rho_S(0))
-       \equiv \Lambda(t)\,\mathrm{vec}(\rho_S(0)) \]
+    \[ \mathrm{vec}(\rho_S(t)) = \Lambda(t)\,\mathrm{vec}(\rho_S(0)) \]
     \why{$\mathcal{L}$ is time independent $\Rightarrow$ the step $t$ may be
          \textbf{arbitrarily large}: no Trotterisation, no small-step error.}
 
@@ -504,11 +503,11 @@
 
     \pic{sene_qc.pdf}
     \figcap{Seven-site FMO: three system qubits carry $|\psi\rangle$, the
-      fourth is the ancilla, framed by two Hadamard gates.}
+      fourth is the ancilla, framed by two Hadamards.}
 
     Propagating $|\psi\rangle\otimes|0\rangle$ through the circuit and using
     $\Sigma_++\Sigma_-=2\Sigma$:
-    \fitline{H\,U_\Sigma\,V^\dagger H\,|\psi\rangle\otimes|0\rangle
+    \fitline{U \, H\,U_\Sigma\,V^\dagger H\,|\psi\rangle\otimes|0\rangle
       = \frac12\begin{pmatrix} U(\Sigma_++\Sigma_-)V^\dagger|\psi\rangle\\[0.4ex]
                                U(\Sigma_+-\Sigma_-)V^\dagger|\psi\rangle
                \end{pmatrix}
@@ -522,13 +521,13 @@
       $\rho_S(t)$, then one step further in time.}
     \smallskip
 
-    \textbf{The enhanced algorithm.} In the loop above the state is
-    re-prepared classically at every time step. Instead, the state of the
+    \textbf{The enhanced algorithm.} In Seneviratne \emph{et al.}~[4] the state is
+    re-prepared classically at every time step. Here, the state of the
     \emph{previous} step is reused:
     \begin{itemize}\tightlist
       \item the \textbf{same} circuit is applied again and again
       \item the classical workload drops, the work moves to the QPU
-      \item the growth of the classical cost with $t$ disappears
+      \item the growth of the classical cost with $t$ disappears, but QST is needed at every step
     \end{itemize}
   \end{block}
 
@@ -536,7 +535,8 @@
   \begin{block}{Result: Markovian Dynamics}
     \pic[0.62]{FMO7_Lindblad_sene.pdf}
     \figcap{Site populations of the seven-site FMO complex over
-      $1000\,$fs. Lines: classical reference, dots: quantum simulation.}
+      $1000\,$fs. Lines: classical reference, dots: quantum simulation (on a classical computer) 
+      using qiskit. The population of site $i$ is the probability for the excitation to be on site $i$.}
   \end{block}%
 \end{postercolumn}\hspace{\colsep}%
 %=======================================================================
@@ -548,9 +548,10 @@
   %---------------------------------------------------------------
   \begin{block}{Non-Markovian Dynamics: HEOM}
     The Markov approximation assumes a bath without memory. The
-    \textbf{hierarchical equations of motion} drop it: the bath degrees of
+    \textbf{hierarchical equations of motion} do not: the bath degrees of
     freedom are absorbed into \textbf{auxiliary density operators} (ADOs)
     $\hat\sigma_{\mathbf n}$ forming a coupled hierarchy,
+    \smallskip
     \fitline{\frac{d}{dt}\hat\sigma_{\mathbf n}
        = \underbrace{-\frac{i}{\hbar}\mathcal{L}_S\hat\sigma_{\mathbf n}
          + \sum_{j,k}\big(\phi_j\theta_{j,0}-n_{jk}\gamma_{jk}\big)\hat\sigma_{\mathbf n}}
@@ -568,10 +569,9 @@
 
   %--- Bilder: Dan_qc.pdf (Abb. 6.18), FMO7_HEOM_sene.pdf (Abb. 6.20) --
   \begin{block}{The Non-Markovian Propagator on a Circuit}
-    Following Dan \emph{et al.}~[5]: HEOM supplies a propagator $G(t)$ whose
+    Following Dan \emph{et al.}~[5]: HEOM yields a propagator $G(t)$ whose
     $m$-th column holds the populations for an initial excitation on site
     $m$:
-    \[ |\psi(t)\rangle = G(t)\,|\psi(0)\rangle \]
     \fitline{G(t) = \left\{
       \begin{pmatrix}
         \rho_{11}^1(t_0) & \rho_{11}^2(t_0) & \rho_{11}^3(t_0) & \rho_{11}^4(t_0)\\
@@ -586,8 +586,8 @@
         \rho_{44}^1(t_1) & \rho_{44}^2(t_1) & \rho_{44}^3(t_1) & \rho_{44}^4(t_1)
       \end{pmatrix},\ \ldots\right\}}
     \why{Four-site case. Superscript: site of the initial excitation, hence
-         $G(t_0)=\mathbb{1}$; $G$ is a \emph{list}, one matrix per step.}
-    \[ G(t) = U\,\Sigma\,V^\dagger \]
+         $G(t_0)=\mathbb{1}$; $G$ is a \emph{list}, one matrix per time step.}
+        \[ |\psi(t)\rangle = G(t)\,|\psi(0)\rangle, \quad G(t) = U\,\Sigma\,V^\dagger \]
     \why{$G(t)$ is non-unitary $\Rightarrow$ the same SVD and the same
          dilation $U_\Sigma$ as above.}
 
@@ -595,7 +595,7 @@
     \figcap{$U$, $V^\dagger$ come straight from the SVD of $G(t)$; $G(t)$
       itself is computed with HEOM.}
 
-    \[ H\,U_\Sigma V^\dagger H\,|\psi(0)\rangle\otimes|0\rangle
+    \[U \, H\,U_\Sigma V^\dagger H\,|\psi(0)\rangle\otimes|0\rangle
        = \begin{pmatrix} |\psi(t)\rangle \\[0.4ex] |\varphi\rangle \end{pmatrix},
        \quad \rho_S = |\psi(t)\rangle\langle\psi(t)| \]
 
