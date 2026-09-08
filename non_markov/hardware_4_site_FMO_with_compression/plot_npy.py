@@ -1,4 +1,4 @@
-"""Plottet die gespeicherten QPU-Zaehlraten direkt als 3 separate PDFs."""
+"""Plottet die gespeicherten QPU-Zaehlraten als einzelne PDFs für Populationen und Kohärenzen."""
 import os
 import numpy as np, matplotlib
 matplotlib.use('Agg')
@@ -38,47 +38,54 @@ for datei, titel, dateiname_praefix in LAEUFE:
     gut = nacc >= NMIN
     cols = plt.cm.tab10(np.arange(4))
 
-    # --- Eigene Figure für diese Spalte (2 Zeilen, 1 Spalte) ---
-    fig, ax = plt.subplots(2, 1, figsize=(5.0, 6.5), sharex=True)
-
-    # 1. Obere Zeile: Populationen
+    # ==========================================
+    # 1. Bild: Populationen (Eigenes PDF)
+    # ==========================================
+    fig_pop, ax_pop = plt.subplots(figsize=(5.0, 3.4))
     for j in range(4):
-        ax[0].plot(t_ex, np.real(ref[:, j, j]), color=cols[j], lw=1.6,
-                   label=f'Site {j+1}')
-        ax[0].errorbar(T[gut], np.real(tr[gut, j, j]), yerr=err[gut, j, j],
-                       fmt='s', ms=5, capsize=3, color=cols[j], lw=1.1)
+        ax_pop.plot(t_ex, np.real(ref[:, j, j]), color=cols[j], lw=1.6,
+                    label=f'Site {j+1}')
+        ax_pop.errorbar(T[gut], np.real(tr[gut, j, j]), yerr=err[gut, j, j],
+                        fmt='s', ms=5, capsize=3, color=cols[j], lw=1.1)
         if (~gut).any():
-            ax[0].plot(T[~gut], np.real(tr[~gut, j, j]), 's', ms=5,
-                       mfc='white', color=cols[j], alpha=.35)
+            ax_pop.plot(T[~gut], np.real(tr[~gut, j, j]), 's', ms=5,
+                        mfc='white', color=cols[j], alpha=.35)
 
-    ax[0].set_title(f'{titel}\n({len(c)} Kreise, t=1..{tmax})', fontsize=11)
-    ax[0].set_ylabel('Population', fontsize=10)
-    ax[0].set_ylim(-0.05, 1.05)
-    ax[0].legend(ncol=2, fontsize=8, loc='upper right')
-    ax[0].grid(alpha=.25)
+    ax_pop.set_xlabel('t [fs]', fontsize=10)
+    ax_pop.set_ylabel('Population', fontsize=10)
+    ax_pop.set_ylim(-0.05, 1.05)
+    ax_pop.legend(ncol=2, fontsize=8, loc='upper right')
+    ax_pop.grid(alpha=.25)
+    fig_pop.tight_layout()
 
-    # 2. Untere Zeile: Kohärenz
+    out_pop = f'pictures/{dateiname_praefix}_population.pdf'
+    fig_pop.savefig(out_pop, bbox_inches='tight')
+    plt.close(fig_pop)
+    print(f"  gespeichert: {out_pop}")
+
+    # ==========================================
+    # 2. Bild: Kohärenzen (Eigenes PDF)
+    # ==========================================
+    fig_coh, ax_coh = plt.subplots(figsize=(5.0, 3.4))
     a, b = PAIRS[0]
     for teil, lab, cc, ee in ((np.real, r'\mathrm{Re}', 'C0', err),
                               (np.imag, r'\mathrm{Im}', 'C2', info['rho_err_im'])):
-        ax[1].plot(t_ex, teil(ref[:, a, b]), lw=1.6, color=cc,
-                   label=rf'${lab}\,\rho_{{{a+1}{b+1}}}$')
-        ax[1].errorbar(T[gut], teil(tr[gut, a, b]), yerr=ee[gut, a, b],
-                       fmt='s', ms=5, capsize=3, color=cc, lw=1.1)
+        ax_coh.plot(t_ex, teil(ref[:, a, b]), lw=1.6, color=cc,
+                    label=rf'${lab}\,\rho_{{{a+1}{b+1}}}$')
+        ax_coh.errorbar(T[gut], teil(tr[gut, a, b]), yerr=ee[gut, a, b],
+                        fmt='s', ms=5, capsize=3, color=cc, lw=1.1)
         if (~gut).any():
-            ax[1].plot(T[~gut], teil(tr[~gut, a, b]), 's', ms=5,
-                       mfc='white', color=cc, alpha=.35)
+            ax_coh.plot(T[~gut], teil(tr[~gut, a, b]), 's', ms=5,
+                        mfc='white', color=cc, alpha=.35)
 
-    ax[1].axhline(0, color='0.85', lw=.8, zorder=0)
-    ax[1].set_ylabel(rf'$\rho_{{{a+1}{b+1}}}$', fontsize=10)
-    ax[1].set_xlabel('t [fs]', fontsize=10)
-    ax[1].legend(fontsize=8, loc='upper left')
-    ax[1].grid(alpha=.25)
+    ax_coh.axhline(0, color='0.85', lw=.8, zorder=0)
+    ax_coh.set_xlabel('t [fs]', fontsize=10)
+    ax_coh.set_ylabel(rf'$\rho_{{{a+1}{b+1}}}$', fontsize=10)
+    ax_coh.legend(fontsize=8, loc='upper left')
+    ax_coh.grid(alpha=.25)
+    fig_coh.tight_layout()
 
-    fig.tight_layout()
-
-    # Als Einzel-PDF speichern
-    out_pdf = f'pictures/{dateiname_praefix}.pdf'
-    fig.savefig(out_pdf, bbox_inches='tight')
-    plt.close(fig)
-    print(f"  gespeichert: {out_pdf}")
+    out_coh = f'pictures/{dateiname_praefix}_coherence.pdf'
+    fig_coh.savefig(out_coh, bbox_inches='tight')
+    plt.close(fig_coh)
+    print(f"  gespeichert: {out_coh}")
