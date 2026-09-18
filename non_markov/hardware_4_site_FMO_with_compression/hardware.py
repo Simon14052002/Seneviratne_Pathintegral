@@ -728,6 +728,226 @@ def watch_job(job, *, interval=15, service=None, verbose=True):
 
 
 # --------------------------------------------------------------------------
+# 5b.  Staffel-Schema:  dt = T/k, immer k Schritte, ein Gitter je Zielzeit
+# --------------------------------------------------------------------------
+#
+# Die Krylov-Kompression ist EXAKT fuer t <= m-1 -- der Raum
+# K_m = span{y0, P y0, ..., P^(m-1) y0} enthaelt P^t y0 dann per Konstruktion.
+# Bei m = 4 sind das drei Schritte.  Statt EINEN Schaltkreis ueber viele
+# Schritte laufen zu lassen (und dabei den Kompressionsfehler einzusammeln),
+# baut dieses Schema je Zielzeit T ein eigenes Gitter mit dt = T/k und geht
+# immer nur k = 3 Schritte.  Gemessen ueber T = 60 .. 1000 fs:
+#
+#   T[fs]   dt[fs]      s     p_ideal   CZ  Treue   Kompressionsfehler
+#      60    20.00  0.994281   0.9405   35  0.899        0.0000000
+#     400   133.33  0.975038   0.8004   35  0.899        0.0000002
+#    1000   333.33  1.014031   0.5054   35  0.899        0.0000001
+#
+# Zum Vergleich: ein Kreis mit 10 Schritten bei dt = 20 fs hat 138 CZ, Treue
+# 0.656 und Kompressionsfehler 0.038; mit 25 Schritten 440 CZ, Treue 0.261,
+# Fehler 0.116 und eine Akzeptanz von 0.002.
+#
+# WICHTIG, damit die Aussage ehrlich bleibt: der Hebel T/dt = k betraegt hier
+# nur 3.  Der Schaltkreis verdreifacht also die klassisch vorbereitete Zeit,
+# waehrend ein 10-Schritt-Lauf sie verzehnfacht.  Bei k = 1 waere der Hebel 1,
+# und dann berechnete die klassische Vorbereitung exp(A T) -- also bereits die
+# Antwort.  k >= 2 ist die Untergrenze, unter der das Verfahren seinen Sinn
+# verliert.
+
+# Nur diese Schluessel werden je Gitter behalten.  Ein volles Gitter enthaelt
+# fuenf 720 x 720-Matrizen (A, P, Pt, Wh, Wih), zusammen rund 20 MB -- bei 50
+# Zielzeiten waeren das ueber 5 GB.  Schaltkreis und Auswertung brauchen davon
+# nichts.
+_STAFFEL_KEYS = ('U', 's', 'm', 'mp', 'n_qubits', 'y0', 'R', 'Hm', 'd', 'D',
+                 'dt_fs', 'depth', 'Nk', 'model', 'rho0', 'svd', 'n_sites')
+
+
+def _schlank(grid):
+    """Gitter auf das reduzieren, was Schaltkreis und Ablesung brauchen."""
+    return {k: grid[k] for k in _STAFFEL_KEYS if k in grid}
+
+
+def staffel_grids(times_fs, *, n_sites=4, m=4, k=3, depth=2, Nk=1, delta=10.0,
+                  model=None, rho0=None, cache=None, verbose=True):
+    """Ein schlankes Gitter je Zielzeit T, gebaut mit dt = T/k.
+
+    `times_fs`  die Zielzeiten in fs, z.B. np.arange(20, 1001, 20)
+    `k`         Schritte je Schaltkreis; muss <= m-1 bleiben, sonst ist die
+                Kompression nicht mehr exakt (bei m=4 also k <= 3)
+    `cache`     Pfad einer .npz; vorhanden wird geladen, sonst nach dem Bau
+                geschrieben.  Ein Bau kostet ~5 s (expm einer 720 x 720-Matrix
+                plus Arnoldi), 50 Zielzeiten also rund vier Minuten.
+
+    Returns eine Liste [(T, grid), ...].
+    """
+    if k > m - 1:
+        raise ValueError(f"k = {k} > m-1 = {m-1}: die Krylov-Kompression waere "
+                         f"nicht mehr exakt.  Entweder k senken oder m erhoehen "
+                         f"(m=8 erlaubt k<=7, kostet aber 78 statt 14 CZ je Schritt).")
+    times_fs = [float(T) for T in times_fs]
+
+    if cache and os.path.exists(cache):
+        z = np.load(cache, allow_pickle=True)
+        gs = list(z['grids'])
+        Ts = list(z['times'])
+        if [round(t, 6) for t in Ts] == [round(t, 6) for t in times_fs]:
+            if verbose:
+                print(f"  {len(gs)} Gitter aus {cache} geladen")
+            return list(zip(Ts, gs))
+        if verbose:
+            print(f"  {cache} passt nicht zu diesen Zielzeiten -- neu gebaut")
+
+    if model is None:
+        model, rho0 = make_model(n_sites)
+    elif rho0 is None:
+        rho0 = np.diag([1.0] + [0.0] * (model['H'].shape[0] - 1))
+
+    out, t0 = [], time.time()
+    for i, T in enumerate(times_fs):
+        g = build_hardware_grid(n_sites=n_sites, m=m, dt_fs=T / k, delta=delta,
+                                depth=depth, Nk=Nk, model=model, rho0=rho0,
+                                verbose=False)
+        out.append((T, _schlank(g)))
+        if verbose and ((i + 1) % 10 == 0 or i + 1 == len(times_fs)):
+            print(f"    {i+1}/{len(times_fs)} Gitter gebaut "
+                  f"({time.time() - t0:.0f} s)", flush=True)
+
+    if cache:
+        os.makedirs(os.path.dirname(cache) or '.', exist_ok=True)
+        np.savez_compressed(cache,
+                            grids=np.array([g for _, g in out], dtype=object),
+                            times=np.array([T for T, _ in out]))
+        if verbose:
+            print(f"  Gitter gesichert in {cache}")
+    return out
+
+
+def staffel_circuits(grids, pairs=None, *, k=3, method='svd', defer=True,
+                     floor=False):
+    """Je Zielzeit k Schritte.  Jeder Job merkt sich, zu welchem Gitter er gehoert.
+
+    Anders als `hardware_circuits` laeuft hier NICHT ein Gitter ueber viele
+    Zeiten, sondern viele Gitter ueber je dieselbe Schrittzahl k.  Die Jobs
+    tragen daher zusaetzlich `T_fs` und `grid_index`.
+    """
+    jobs = []
+    for gi, (T, g) in enumerate(grids):
+        for j in hardware_circuits(g, [k], pairs, method=method, defer=defer,
+                                   floor=floor):
+            j['T_fs'] = float(T)
+            j['grid_index'] = gi
+            jobs.append(j)
+    return jobs
+
+
+def analyze_staffel(grids, jobs, counts_list, *, pairs=None, verbose=True,
+                    quelle='QPU'):
+    """Wie `analyze`, aber je Zielzeit mit dem GITTER dieser Zeit.
+
+    Entscheidend: s, ||y0|| und die Ablesenormen ||r_j|| gehoeren jeweils zu
+    dem dt, mit dem der betreffende Schaltkreis gebaut wurde -- sie sind hier
+    also NICHT global, sondern je Zeitpunkt verschieden.
+    """
+    d = grids[0][1]['d']
+    pairs = list(pairs or [])
+    Ts = [float(T) for T, _ in grids]
+    idx = {(j['grid_index'], j['tag']): i for i, j in enumerate(jobs)}
+
+    rho = np.full((len(Ts), d, d), np.nan, complex)
+    rho_tr = np.full((len(Ts), d, d), np.nan, complex)
+    err_re = np.full((len(Ts), d, d), np.nan)
+    err_im = np.full((len(Ts), d, d), np.nan)
+    prob = np.full(len(Ts), np.nan)
+    q_null = np.full(len(Ts), np.nan)
+
+    for gi, (T, g) in enumerate(grids):
+        s = g['s']
+        scale0 = float(np.linalg.norm(g['y0']))
+        vals, accs = {}, {}
+        for j in jobs:
+            if j['grid_index'] != gi:
+                continue
+            i = idx[(gi, j['tag'])]
+            tot, acc, hit = _split_counts(counts_list[i], j['t'], j['n_sys'])
+            accs[j['tag']] = acc
+            vals[j['tag']] = (hit / acc if acc else np.nan, acc, j['norm'])
+        a0 = accs.get(('pop', 0, 0), 0)
+        if not a0:
+            continue
+        i0 = idx[(gi, ('pop', 0, 0))]
+        t_steps = jobs[i0]['t']
+        prob[gi] = a0 / sum(counts_list[i0].values())
+        lam = scale0 * s ** t_steps * np.sqrt(prob[gi])
+
+        if ('null', -1, -1) in vals:
+            q_null[gi] = vals[('null', -1, -1)][0]
+
+        pop = np.zeros(d)
+        dpop = np.zeros(d)
+        for j2 in range(d):
+            q, acc, nv = vals[('pop', j2, j2)]
+            pop[j2] = nv * lam * np.sqrt(max(q, 0.0))
+            dpop[j2] = nv * lam / (2 * np.sqrt(acc)) if acc else np.nan
+        M = np.diag(pop).astype(complex)
+        E, Eim = np.diag(dpop), np.zeros((d, d))
+
+        for (a, b) in pairs:
+            got = {}
+            for tag in ('pp', 'RR'):
+                q, acc, nv = vals[(tag, a, b)]
+                got[tag] = (nv * lam * np.sqrt(max(q, 0.0)),
+                            nv * lam / (2 * np.sqrt(acc)) if acc else np.nan)
+            half = 0.5 * (pop[a] + pop[b])
+            quart = 0.25 * dpop[a] ** 2 + 0.25 * dpop[b] ** 2
+            M[a, b] = (got['pp'][0] - half) + 1j * (got['RR'][0] - half)
+            M[b, a] = np.conj(M[a, b])
+            E[a, b] = E[b, a] = np.sqrt(got['pp'][1] ** 2 + quart)
+            Eim[a, b] = Eim[b, a] = np.sqrt(got['RR'][1] ** 2 + quart)
+
+        rho[gi], err_re[gi], err_im[gi] = M, E, Eim
+        tr = np.real(np.trace(M))
+        if tr > 0:
+            rho_tr[gi] = M / tr
+
+    # Referenz: qutip auf genau den Zielzeiten, plus t=0 fuer die Kurve
+    g0 = grids[0][1]
+    t_ref = np.concatenate([[0.0], np.array(Ts)])
+    ref = qutip_reference_rho(t_ref, rho0=g0['rho0'], depth=g0['depth'],
+                              Nk=g0['Nk'], **g0['model'])[1:]
+
+    ok = np.isfinite(np.real(rho[:, 0, 0]))
+    if verbose and ok.any():
+        print(f"\n  {quelle} gegen qutip HEOMSolver (Staffel, k={jobs[0]['t']}):")
+        for gi in np.where(ok)[0]:
+            dp = np.abs(np.real(np.diag(rho[gi]))
+                        - np.real(np.diag(ref[gi]))).max()
+            dt_ = np.abs(np.real(np.diag(rho_tr[gi]))
+                         - np.real(np.diag(ref[gi]))).max()
+            bd = (f" | Boden {q_null[gi]:.4f}" if np.isfinite(q_null[gi]) else "")
+            print(f"    T = {Ts[gi]:6.0f} fs (dt = {grids[gi][1]['dt_fs']:6.2f}) | "
+                  f"p_succ {prob[gi]:.4f} | Spur {np.real(np.trace(rho[gi])):.4f} | "
+                  f"max|dPop| ueber p_t {dp:.4f} | spurnormiert {dt_:.4f}{bd}")
+    return rho, err_re, dict(T_fs=np.array(Ts), p_success=prob,
+                             rho_err_im=err_im, rho_tr=rho_tr, reference=ref,
+                             pairs=pairs, q_null=q_null, quelle=quelle)
+
+
+def verify_staffel_in_aer(grids, jobs, *, shots=4096, pairs=None, verbose=True):
+    """Die Staffel-Schaltkreise rauschfrei in Aer -- misst nur den Algorithmus."""
+    from qiskit_aer import AerSimulator
+    sim = AerSimulator(seed_simulator=7)
+    counts = []
+    for i, j in enumerate(jobs):
+        c = transpile(j['circuit'], sim, optimization_level=0)
+        r = sim.run(c, shots=shots).result().get_counts()
+        counts.append({kk.replace(' ', ''): v for kk, v in r.items()})
+        if verbose and (i + 1) % 25 == 0:
+            print(f"    {i+1}/{len(jobs)} simuliert", flush=True)
+    return analyze_staffel(grids, jobs, counts, pairs=pairs, verbose=verbose,
+                           quelle='Aer')
+
+
+# --------------------------------------------------------------------------
 # 6.  auswerten
 # --------------------------------------------------------------------------
 
