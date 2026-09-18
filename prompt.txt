@@ -1,0 +1,1 @@
+Stelle auch sicher dass alles so gut installiert ist dass ich es dann alles als jupyter notebook verwenden kann und so. Und wenn du ganz ende mit allem fertig bist, mache noch eine letzte prüfung ob das auch am quantencomputer laufen würde und ob wirklich alles passt sodass man es losschicken könnte
