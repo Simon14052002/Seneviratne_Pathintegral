@@ -52,13 +52,13 @@ import numpy as np
 from scipy.linalg import (expm, solve_continuous_lyapunov, eigh, sqrtm,
                           schur, get_lapack_funcs)
 
-__all__ = ['FS_TO_CM', 'KB_CM', 'H_FMO_FULL', 'make_model',
+__all__ = ['FS_TO_CM', 'KB_CM', 'H_FMO_FULL', 'make_model', 'selbsttest',
            'calc_L_list', 'lindblad_superop', 'lindblad_generator',
            'lindblad_onestep_map',
            'lyapunov_schur', 'contraction_gauge', 'gauged_propagator',
            'arnoldi', 'safe_norm2', 'dilate',
            'build_markov_grid', 'regrid',
-           'pops_from_y', 'reference_trajectory',
+           'pops_from_y', 'reference_trajectory', 'krylov_fehler_je_site',
            'qutip_reference', 'qutip_reference_rho']
 
 _C_CM = 2.99792458e10                    # Lichtgeschwindigkeit [cm/s]
@@ -146,10 +146,146 @@ def calc_L_list(H, lam, gamma, T_K, KB_CM):
                     if abs((eks[M] - eks[N]) - w) < 1e-9:
                         amp = np.conj(V[m, M]) * V[m, N]       # <v_M|m><m|v_N>
                         Lmw += amp * np.outer(V[:, M], np.conj(V[:, N]))
-            gam = 2 * Re_tau(w)
+            # VORZEICHENKONVENTION -- hier lag ein Fehler, siehe Test
+            # `pruefe_detailliertes_gleichgewicht` unten.
+            #
+            # Lmw ist aus Termen |v_M><v_N| mit E_M - E_N = w gebaut, bildet
+            # also |v_N> auf |v_M> mit E_M = E_N + w ab: positives w HEBT die
+            # Energie an.  Die Rate dafuer ist die ABSORPTION aus dem Bad,
+            # J(w) n(w).  Re_tau(w) = J(w) (n(w)+1) ist dagegen die EMISSION
+            # und gehoert zu energiesenkenden Operatoren.
+            #
+            # In der ueblichen Konvention (Breuer-Petruccione) senkt A(omega)
+            # mit omega > 0 die Energie, und genau dort steht (n+1).  Dieses
+            # Modul baut die Operatoren mit dem umgekehrten Vorzeichen, also
+            # muss die Rate bei -w ausgewertet werden.  Wegen
+            #     J(-w) (n(-w)+1) = J(w) n(w)
+            # liefert Re_tau(-w) exakt die Absorptionsrate.
+            #
+            # Mit Re_tau(+w) relaxierte der Generator in die ANTI-Boltzmann-
+            # Verteilung: das Verhaeltnis rauf/runter war exp(+w/kT) = 6.59
+            # statt exp(-w/kT) = 0.15, und der hoechste Eigenzustand bekam
+            # 54.5 % statt 7.4 % der Population.
+            gam = 2 * Re_tau(-w)
             if gam > 0:
                 L_list.append(np.sqrt(gam) * Lmw)
     return L_list
+
+
+def selbsttest(model=None, rho0=None, dt_fs=20.0, n_steps=10, streng=True,
+               verbose=True):
+    """Zehn physikalische Pflichtpruefungen des Generators.  Wirft bei Verstoss.
+
+    Hintergrund: in einer frueheren Fassung bekamen in `calc_L_list` die
+    energieANHEBENDEN Operatoren die EMISSIONsrate J(w)(n(w)+1) statt der
+    Absorptionsrate J(w)n(w).  Das Verhaeltnis rauf/runter war dadurch
+    exp(+w/kT) statt exp(-w/kT), und der Generator relaxierte exakt in die
+    ANTI-Boltzmann-Verteilung -- der hoechste Eigenzustand bekam 54.5 % statt
+    7.4 %.  Der Fehler war an den Populationskurven nicht ohne Weiteres zu
+    sehen, weil der Algorithmus den (falschen) Generator korrekt reproduzierte
+    und auch die qutip-Referenz dieselben Sprungoperatoren benutzte.
+
+    Pruefung 1 und 2 haetten ihn sofort gefunden.  Deshalb vor jedem
+    Hardwarelauf aufrufen.
+    """
+    import numpy as np
+    from scipy.linalg import expm
+    if model is None:
+        model, rho0 = make_model(4)
+    if rho0 is None:
+        rho0 = np.diag([1.0] + [0.0] * (model['H'].shape[0] - 1))
+    H = model['H']; d = H.shape[0]
+    kBT = model['KB_CM'] * model['T_K']
+    eks, V = np.linalg.eigh(H)
+    A, info = lindblad_generator(**model)
+    P = expm(A * dt_fs * model['FS_TO_CM'])
+    fehler = []
+
+    def pruefe(name, bedingung, zusatz=''):
+        if verbose:
+            print(f"  [{'OK  ' if bedingung else 'FEHLER'}] {name}{zusatz}")
+        if not bedingung:
+            fehler.append(name)
+
+    # 1 stationaerer Zustand == Boltzmann
+    w_, vr = np.linalg.eig(A)
+    rho = vr[:, np.argmin(np.abs(w_))].reshape(d, d, order='F')
+    rho = rho / np.trace(rho)
+    pop = np.real(np.diag(V.conj().T @ rho @ V))
+    bz = np.exp(-(eks - eks.min()) / kBT); bz /= bz.sum()
+    ab = np.abs(pop - bz).max()
+    pruefe('stationaerer Zustand = Boltzmann', ab < 1e-8, f' (Abstand {ab:.2e})')
+
+    # 2 detailliertes Gleichgewicht der Raten
+    L_list = info['L_list']
+    om = eks[-1] - eks[0]
+    lam, gam_b = model['lam'], model['gamma']
+    def J(o): return 2 * lam * o * gam_b / (o ** 2 + gam_b ** 2)
+    def nb(o): return 1.0 / (np.exp(o / kBT) - 1.0)
+    rauf, runter = J(om) * nb(om), J(om) * (nb(om) + 1.0)
+    pruefe('detailliertes Gleichgewicht', abs(rauf / runter - np.exp(-om / kBT)) < 1e-9,
+           f' (rauf/runter {rauf/runter:.5f} = exp(-w/kT) {np.exp(-om/kBT):.5f})')
+
+    # 3 Spurerhaltung
+    tv = np.eye(d).reshape(-1, order='F')
+    m3 = np.abs(tv @ A).max()
+    pruefe('Spurerhaltung', m3 < 1e-8, f' (max|1^T A| = {m3:.2e})')
+
+    # 4 Hermitizitaet erhalten
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(d, d)) + 1j * rng.normal(size=(d, d)); X = X + X.conj().T
+    Y = (P @ X.reshape(-1, order='F')).reshape(d, d, order='F')
+    m4 = np.abs(Y - Y.conj().T).max()
+    pruefe('hermitesch erhalten', m4 < 1e-8, f' ({m4:.2e})')
+
+    # 5 vollstaendige Positivitaet (Choi)
+    Choi = np.zeros((d * d, d * d), complex)
+    for i in range(d):
+        for j in range(d):
+            E = np.zeros((d, d)); E[i, j] = 1
+            Choi[i*d:(i+1)*d, j*d:(j+1)*d] = \
+                (P @ E.reshape(-1, order='F')).reshape(d, d, order='F')
+    mn = np.linalg.eigvalsh((Choi + Choi.conj().T) / 2).min()
+    pruefe('vollstaendig positiv', mn > -1e-8, f' (min Choi-Eigenwert {mn:.2e})')
+
+    # 6 gegen qutip mesolve
+    t = np.arange(0.0, n_steps * dt_fs + 0.5, dt_fs)
+    ref = qutip_reference_rho(t, rho0=rho0, **model)
+    y = np.asarray(rho0, complex).reshape(-1, order='F')
+    e6 = 0.0
+    for k in range(1, len(t)):
+        y = P @ y
+        e6 = max(e6, np.abs(y.reshape(d, d, order='F') - ref[k]).max())
+    pruefe('exp(A dt)^n == qutip mesolve', e6 < 1e-6, f' (max {e6:.2e})')
+
+    # 7 Sprungoperatoren wohlgeformt
+    S = sum(Lk.conj().T @ Lk for Lk in L_list)
+    pruefe('sum L^dag L hermitesch', np.abs(S - S.conj().T).max() < 1e-8)
+
+    # 8 Dephasierungsgrenzwert
+    lim = 2 * kBT * lam / gam_b
+    nah = J(1e-6) * (nb(1e-6) + 1.0)
+    pruefe('Dephasierungsrate stetig bei w->0', abs(lim - nah) / lim < 1e-4,
+           f' ({lim:.4f} vs {nah:.4f})')
+
+    # 9 keine negativen Raten
+    neg = sum(1 for Lk in L_list if not np.isfinite(Lk).all())
+    pruefe('alle Sprungoperatoren endlich', neg == 0, f' ({neg} fehlerhaft)')
+
+    # 10 Anfangszustand physikalisch
+    r0a = np.asarray(rho0, complex)
+    pruefe('rho0 Spur 1 und positiv',
+           abs(np.trace(r0a) - 1) < 1e-12
+           and np.linalg.eigvalsh((r0a + r0a.conj().T) / 2).min() > -1e-12)
+
+    if fehler:
+        msg = f"Selbsttest fehlgeschlagen: {fehler}"
+        if streng:
+            raise AssertionError(msg)
+        print('  ' + msg)
+    elif verbose:
+        print(f"  alle 10 Pruefungen bestanden")
+    return not fehler
 
 
 def lindblad_superop(H, L_list):
@@ -483,6 +619,54 @@ def reference_trajectory(grid, n_steps, exact=False):
     return np.array(out)                          # der Auswertung wieder auf
 
 
+def krylov_fehler_je_site(grid, n_steps, *, spurnormiert=True):
+    """Der Krylov-Abschneidefehler JE SITE und Zeitschritt, vorzeichenbehaftet.
+
+    `reference_trajectory` liefert die Trajektorien, die Zelle 3b als Maximum
+    ueber alle Sites zusammenfasst.  Diese Funktion behaelt die Aufloesung nach
+    Site UND das Vorzeichen -- und erst daran sieht man die eigentliche
+    Struktur: die Abschneidung verschiebt Population gerichtet zwischen den
+    Sites, statt sie gleichmaessig zu verrauschen.
+
+    Gemessen bei m = 4, dt = 20 fs, t = 10 (spurnormiert):
+
+        Site 1   -0.0056      Site 3   -0.0469
+        Site 2   -0.0037      Site 4   +0.0562
+
+    Site 4 wird also zu hoch, Site 3 zu tief, waehrend 1 und 2 kaum betroffen
+    sind.  Grund: K_m enthaelt P^t y0 exakt nur fuer t <= m-1, und gerade der
+    langsame Aufbau der schwach besetzten Zustaende 3 und 4 lebt von den
+    Richtungen, die der Unterraum nicht mehr darstellt.
+
+    `spurnormiert=True` vergleicht so, wie das Notebook plottet -- die
+    Spurnormierung ist die Ablesung, die p_t nicht braucht.
+
+    Returns ein dict mit
+        t_fs         (n_steps+1,)        Zeiten
+        pop_krylov   (n_steps+1, d)      was das Gitter liefert
+        pop_exakt    (n_steps+1, d)      geeichter Propagator ohne Kompression
+        pop_qutip    (n_steps+1, d)      qutip mesolve
+        fehler       (n_steps+1, d)      pop_krylov - pop_qutip
+        fehler_exakt (n_steps+1, d)      pop_exakt  - pop_qutip  (~1e-9)
+    """
+    d = grid['d']
+    t_fs = np.arange(n_steps + 1) * grid['dt_fs']
+    kry = reference_trajectory(grid, n_steps)
+    exa = reference_trajectory(grid, n_steps, exact=True)
+    ref = qutip_reference_rho(t_fs, rho0=grid['rho0'], **grid['model'])
+
+    def diag(arr):
+        p = np.real(np.einsum('tii->ti', arr))
+        if spurnormiert:
+            sp = p.sum(axis=1, keepdims=True)
+            p = np.divide(p, sp, out=np.zeros_like(p), where=np.abs(sp) > 1e-30)
+        return p
+
+    pk, pe, pq = diag(kry), diag(exa), diag(ref)
+    return dict(t_fs=t_fs, pop_krylov=pk, pop_exakt=pe, pop_qutip=pq,
+                fehler=pk - pq, fehler_exakt=pe - pq)
+
+
 def post_selection_curve(grid, n_steps):
     """p_t = ||H_m^t y0||^2 / (s^(2t) ||y0||^2) -- die ideale
     Nachselektionswahrscheinlichkeit, ohne jedes Geraeterauschen.  Sie ist der
@@ -500,6 +684,14 @@ def post_selection_curve(grid, n_steps):
 def qutip_reference_rho(t_fs, *, rho0, H, lam, gamma, T_K, KB_CM, FS_TO_CM):
     """BENCHMARK: die gewoehnliche Rechnung mit qutips `mesolve` -- kein
     Gitter, keine Kompression, keine Dilatation.  Dieselben Sprungoperatoren.
+
+    ACHTUNG, Grenze dieses Vergleichs: die Sprungoperatoren kommen aus unserem
+    eigenen `calc_L_list`, qutip steuert nur den ODE-Integrator bei.  Geprueft
+    wird damit, ob exp(A dt)^n dieselbe DGL loest wie der Integrator -- NICHT,
+    ob A der richtige Generator ist.  Genau deshalb blieb der Vorzeichenfehler
+    in `calc_L_list` hier unsichtbar (Abweichung 3.6e-8, also unauffaellig).
+    Fuer die Physik ist `selbsttest` zustaendig, insbesondere Pruefung 1
+    (stationaerer Zustand = Boltzmann) und 2 (detailliertes Gleichgewicht).
     Returns (len(t_fs), d, d) komplex, damit auch die Kohaerenzen eine
     Referenz haben."""
     import qutip as qt

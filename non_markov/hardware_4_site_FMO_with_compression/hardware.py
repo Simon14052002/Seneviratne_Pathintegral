@@ -47,25 +47,37 @@ import numpy as np
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
 from qiskit.circuit.library import UnitaryGate, DiagonalGate
 
-# heom_gauge.py / gauge_circuit.py liegen im Schwesterordner
+# heom_gauge.py / gauge_circuit.py liegen im Schwesterordner -- ABER eine
+# lokale Kopie hat Vorrang.  Ohne diese Abfrage schob die Schleife unten den
+# Schwesterordner an sys.path[0] und verdeckte damit die Datei, die direkt
+# neben diesem Modul liegt.  Das war lange folgenlos, weil sich die beiden
+# Kopien nur in der Voreinstellung von `scale_ados` unterscheiden und
+# `build_hardware_grid` sie ohnehin explizit auf True setzt -- aber jede
+# Aenderung an der lokalen Datei waere wirkungslos geblieben.
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _up in range(1, 4):
-    _root = os.path.abspath(os.path.join(_HERE, *(['..'] * _up)))
-    for _c in (_root, os.path.join(_root, 'with_compression')):
-        if os.path.exists(os.path.join(_c, 'heom_gauge.py')):
-            if _c not in sys.path:
-                sys.path.insert(0, _c)
-            break
-    else:
-        continue
-    break
+if os.path.exists(os.path.join(_HERE, 'heom_gauge.py')):
+    if _HERE in sys.path:
+        sys.path.remove(_HERE)
+    sys.path.insert(0, _HERE)          # lokale Kopie gewinnt, Suche entfaellt
+else:
+    for _up in range(1, 4):
+        _root = os.path.abspath(os.path.join(_HERE, *(['..'] * _up)))
+        for _c in (_root, os.path.join(_root, 'with_compression')):
+            if os.path.exists(os.path.join(_c, 'heom_gauge.py')):
+                if _c not in sys.path:
+                    sys.path.insert(0, _c)
+                break
+        else:
+            continue
+        break
 
-from heom_gauge import build_grid, regrid, qutip_reference, qutip_reference_rho
+from heom_gauge import (build_grid, regrid, qutip_reference, qutip_reference_rho,
+                        krylov_fehler_je_site)
 
 __all__ = ['MODEL', 'RHO0', 'H_FMO_FULL', 'make_model', 'isa_report',
            'build_hardware_grid', 'hardware_circuits', 'report_cost',
            'verify_in_aer', 'run_on_backend', 'analyze',
-           'qutip_reference', 'qutip_reference_rho']
+           'qutip_reference', 'qutip_reference_rho', 'krylov_fehler_je_site']
 
 _C_CM = 2.99792458e10
 FS_TO_CM = 1e-15 * 2 * np.pi * _C_CM

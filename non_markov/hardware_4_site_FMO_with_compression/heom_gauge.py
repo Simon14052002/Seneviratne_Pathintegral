@@ -384,6 +384,53 @@ def reference_trajectory(grid, n_steps, exact=False):
     return np.array(out)
 
 
+def krylov_fehler_je_site(grid, n_steps, *, spurnormiert=True):
+    """Der Krylov-Abschneidefehler JE SITE und Zeitschritt, vorzeichenbehaftet.
+
+    `reference_trajectory` liefert die beiden Trajektorien; diese Funktion
+    stellt sie der qutip-Referenz gegenueber und behaelt dabei die Aufloesung
+    nach Site UND das Vorzeichen.  Erst daran sieht man die Struktur: die
+    Abschneidung verrauscht die Populationen nicht, sie VERSCHIEBT sie
+    gerichtet zwischen den Sites.
+
+    K_m enthaelt P^t y0 exakt fuer t <= m-1; bei m = 4 sind das drei Schritte.
+    Davor liegt der Fehler bei ~1e-9, danach waechst er monoton.
+
+    `exact=True` in `reference_trajectory` iteriert den geeichten Propagator
+    P~ OHNE Kompression.  Bleibt dessen Fehler bei ~1e-9, ist bewiesen, dass
+    Eichung und Ablesematrix R sauber sind und der sichtbare Fehler
+    vollstaendig aus der Krylov-Abschneidung stammt -- das ist die
+    eigentliche Aussage dieser Funktion.
+
+    `spurnormiert=True` vergleicht so, wie das Notebook plottet: die
+    Spurnormierung ist die Ablesung, die p_t nicht braucht.
+
+    Returns ein dict mit
+        t_fs         (n_steps+1,)        Zeiten in fs
+        pop_krylov   (n_steps+1, d)      was das Gitter liefert
+        pop_exakt    (n_steps+1, d)      geeichter Propagator ohne Kompression
+        pop_qutip    (n_steps+1, d)      qutip HEOMSolver
+        fehler       (n_steps+1, d)      pop_krylov - pop_qutip
+        fehler_exakt (n_steps+1, d)      pop_exakt  - pop_qutip
+    """
+    t_fs = np.arange(n_steps + 1) * grid['dt_fs']
+    # reference_trajectory gibt hier POPULATIONEN zurueck, nicht Dichtematrizen
+    pk = np.asarray(reference_trajectory(grid, n_steps), float)
+    pe = np.asarray(reference_trajectory(grid, n_steps, exact=True), float)
+    pq = np.asarray(qutip_reference(t_fs, rho0=grid['rho0'],
+                                    depth=grid['depth'], Nk=grid['Nk'],
+                                    **grid['model']), float)
+
+    if spurnormiert:
+        def norm(a):
+            sp = a.sum(axis=1, keepdims=True)
+            return np.divide(a, sp, out=np.zeros_like(a), where=np.abs(sp) > 1e-30)
+        pk, pe, pq = norm(pk), norm(pe), norm(pq)
+
+    return dict(t_fs=t_fs, pop_krylov=pk, pop_exakt=pe, pop_qutip=pq,
+                fehler=pk - pq, fehler_exakt=pe - pq)
+
+
 def qutip_reference(t_fs, *, rho0, depth=3, Nk=1, **MODEL):
     """The only benchmark used in this folder: qutip's own HEOMSolver."""
     solver = make_solver(H=MODEL['H'], lam=MODEL['lam'], gamma=MODEL['gamma'],
